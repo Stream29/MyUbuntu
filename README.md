@@ -6,4 +6,5 @@ Custom Ubuntu desktop configuration, Sway/GNOME integration helpers, user system
 - `sway/`, `tmux/`, `shell/`, `gnupg/`, `applications/`: User desktop and shell configuration.
 - `systemd/`: User systemd units and `environment.d/` drop-ins.
 - `system/`: Reference sources for root-owned `/etc` and `/usr/local/lib` configurations (copy with `root:root`; do not symlink `/etc` into user-writable trees).
-- `tests/`: Regression tests for desktop lock and Sway/Fcitx5 integration.
+- `tests/`: Regression tests for desktop lock, Sway/Fcitx5, and AnyStorage control.
+- `docs/`: Additional notes (including [`docs/ime.md`](docs/ime.md) for desktop Fcitx5/Rime/vinput setup).
