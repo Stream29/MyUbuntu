@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly TMUX_BIN='/usr/bin/tmux'
+readonly -a MENU_KEYS=(
+    'MouseDown3Pane'
+    'MouseDown3Status'
+    'M-MouseDown3Pane'
+    'M-MouseDown3Status'
+    'M-MouseDown3StatusLeft'
+)
+
+for menu_key in "${MENU_KEYS[@]}"; do
+    if ! binding="$("${TMUX_BIN}" list-keys -T root "${menu_key}")"; then
+        continue
+    fi
+
+    if [[ "${binding}" == *'display-menu -O '* ]]; then
+        continue
+    fi
+    if [[ "${binding}" != *'display-menu '* ]]; then
+        continue
+    fi
+
+    binding="${binding/display-menu /display-menu -O }"
+    printf '%s\n' "${binding}" | "${TMUX_BIN}" source-file -
+done

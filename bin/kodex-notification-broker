@@ -1,0 +1,136 @@
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import GLibUnix from 'gi://GLibUnix';
+import {exit} from 'system';
+
+const APP_ID = 'io.github.stream29.Kodex';
+const BUS_NAME = 'io.github.stream29.Kodex.NotificationBroker';
+const OBJECT_PATH = '/io/github/stream29/Kodex/NotificationBroker';
+const INTERFACE_NAME = 'io.github.stream29.Kodex.NotificationBroker';
+const FDO_BUS_NAME = 'org.freedesktop.Notifications';
+const FDO_OBJECT_PATH = '/org/freedesktop/Notifications';
+const FDO_INTERFACE_NAME = 'org.freedesktop.Notifications';
+const CALL_TIMEOUT_MS = 5000;
+
+const interfaceXml = `
+<node>
+  <interface name="${INTERFACE_NAME}">
+    <method name="Notify">
+      <arg name="body" type="s" direction="in"/>
+      <arg name="id" type="u" direction="out"/>
+    </method>
+    <method name="Close">
+      <arg name="id" type="u" direction="in"/>
+    </method>
+  </interface>
+</node>`;
+
+Gio._promisify(Gio.DBusConnection.prototype, 'call');
+
+class NotificationBroker {
+    constructor(connection) {
+        this._connection = connection;
+        this._dbusObject = Gio.DBusExportedObject.wrapJSObject(interfaceXml, this);
+        this._dbusObject.export(connection, OBJECT_PATH);
+    }
+
+    unexport() {
+        this._dbusObject.unexport();
+    }
+
+    async NotifyAsync(params, invocation) {
+        const [body] = params;
+        const hints = {
+            'desktop-entry': new GLib.Variant('s', APP_ID),
+            urgency: new GLib.Variant('y', 1),
+        };
+
+        try {
+            const result = await this._connection.call(
+                FDO_BUS_NAME,
+                FDO_OBJECT_PATH,
+                FDO_INTERFACE_NAME,
+                'Notify',
+                new GLib.Variant('(susssasa{sv}i)', [
+                    'Kodex',
+                    0,
+                    'utilities-terminal',
+                    'Kodex',
+                    GLib.markup_escape_text(body, -1),
+                    [],
+                    hints,
+                    -1,
+                ]),
+                new GLib.VariantType('(u)'),
+                Gio.DBusCallFlags.NONE,
+                CALL_TIMEOUT_MS,
+                null,
+            );
+            invocation.return_value(result);
+        } catch (error) {
+            invocation.return_gerror(error);
+        }
+    }
+
+    async CloseAsync(params, invocation) {
+        const [id] = params;
+
+        try {
+            const result = await this._connection.call(
+                FDO_BUS_NAME,
+                FDO_OBJECT_PATH,
+                FDO_INTERFACE_NAME,
+                'CloseNotification',
+                new GLib.Variant('(u)', [id]),
+                new GLib.VariantType('()'),
+                Gio.DBusCallFlags.NONE,
+                CALL_TIMEOUT_MS,
+                null,
+            );
+            invocation.return_value(result);
+        } catch (error) {
+            invocation.return_gerror(error);
+        }
+    }
+}
+
+const mainLoop = new GLib.MainLoop(null, false);
+let broker = null;
+let exitCode = 0;
+let shuttingDown = false;
+
+const ownerId = Gio.bus_own_name(
+    Gio.BusType.SESSION,
+    BUS_NAME,
+    Gio.BusNameOwnerFlags.DO_NOT_QUEUE,
+    connection => {
+        try {
+            broker = new NotificationBroker(connection);
+        } catch (error) {
+            console.error(`Failed to export notification broker: ${error.message ?? error}`);
+            exitCode = 1;
+            mainLoop.quit();
+        }
+    },
+    null,
+    () => {
+        if (!shuttingDown) {
+            console.error(`Lost D-Bus name ${BUS_NAME}`);
+            exitCode = 1;
+        }
+        mainLoop.quit();
+    },
+);
+
+for (const signal of [2, 15]) {
+    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal, () => {
+        shuttingDown = true;
+        mainLoop.quit();
+        return GLib.SOURCE_REMOVE;
+    });
+}
+
+mainLoop.run();
+broker?.unexport();
+Gio.bus_unown_name(ownerId);
+exit(exitCode);

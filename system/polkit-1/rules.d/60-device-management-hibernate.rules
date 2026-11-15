@@ -1,0 +1,11 @@
+// Allow active local sudo users to hibernate
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.upower.hibernate" ||
+         action.id == "org.freedesktop.login1.hibernate" ||
+         action.id == "org.freedesktop.login1.handle-hibernate-key" ||
+         action.id == "org.freedesktop.login1.hibernate-multiple-sessions") &&
+        subject.active == true && subject.local == true &&
+        subject.isInGroup("sudo")) {
+            return polkit.Result.YES;
+    }
+});

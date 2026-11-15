@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export WINEPREFIX="${WINE_GBK_PREFIX:-$HOME/.wine-gbk}"
+if [[ -n "${WINE_GBK_ARCH:-}" ]]; then
+  export WINEARCH="$WINE_GBK_ARCH"
+else
+  unset WINEARCH
+fi
+export LANG="${WINE_GBK_LANG:-zh_CN.gbk}"
+export LC_ALL="${WINE_GBK_LC_ALL:-zh_CN.gbk}"
+export FONTCONFIG_FILE="${WINE_GBK_FONTCONFIG_FILE:-$HOME/.local/share/wine-gbk/fonts.conf}"
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wine-gbk"
+mkdir -p "$state_dir"
+stamp="$state_dir/init-v2.stamp"
+regfile="$HOME/.local/share/wine-gbk/fonts.reg"
+fontfix_dll="$HOME/.local/share/wine-gbk/fontfix.dll"
+fontfix_launcher="$HOME/.local/share/wine-gbk/fontfix-launcher.exe"
+
+copy_font_if_available() {
+  local name="$1"
+  local source="$HOME/.wine/drive_c/windows/Fonts/$name"
+  local target="$WINEPREFIX/drive_c/windows/Fonts/$name"
+
+  if [[ ! -e "$source" ]]; then
+    return
+  fi
+
+  if [[ ! -e "$target" ]]; then
+    cp -a --remove-destination "$source" "$target"
+    return
+  fi
+
+  case "$name" in
+    *.ttc|*.ttf)
+      if [[ -L "$target" ]] || ! file "$target" | grep -Eq 'TrueType|OpenType'; then
+        cp -a --remove-destination "$source" "$target"
+      fi
+      ;;
+  esac
+}
+
+copy_fon_if_available() {
+  local name="$1"
+  local source="$2/$name"
+  local target="$WINEPREFIX/drive_c/windows/Fonts/$name"
+
+  if [[ -e "$source" ]]; then
+    cp -a --remove-destination "$source" "$target"
+  fi
+}
+
+init_wine_gbk_prefix() {
+  mkdir -p "$WINEPREFIX"
+
+  if [[ ! -e "$WINEPREFIX/system.reg" ]]; then
+    WINEDEBUG=-all wineboot -u
+  fi
+
+  mkdir -p "$WINEPREFIX/drive_c/windows/Fonts"
+  for font_file in \
+    simsun.ttc simsunb.ttf simhei.ttf simfang.ttf simkai.ttf \
+    msyh.ttc msyhbd.ttc msyhl.ttc msgothic.ttc
+  do
+    copy_font_if_available "$font_file"
+  done
+
+  if [[ -e "$WINEPREFIX/drive_c/windows/Fonts/simsun.ttc" ]]; then
+    local windows_fon_dir="$HOME/.local/share/wine-gbk/windows-fonts/1/Windows/Fonts"
+    if [[ -d "$windows_fon_dir" ]]; then
+      for font_file in svgasys.fon vgasys.fon vgafix.fon sserife.fon serife.fon smalle.fon coure.fon; do
+        copy_fon_if_available "$font_file" "$windows_fon_dir"
+      done
+    fi
+  fi
+}
+
+ensure_wine_gbk_runtime_registry() {
+  WINEDEBUG=-all wine reg add 'HKCU\Software\Wine\Fonts' /v 'Codepages' /d '936,1252,437' /f >/dev/null 2>&1 || true
+  for font_substitute in 'MS Shell Dlg' 'MS Shell Dlg 2' 'System' 'Tahoma' 'MS Sans Serif'; do
+    WINEDEBUG=-all wine reg add 'HKLM\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes' /v "$font_substitute" /d 'SimSun' /f >/dev/null 2>&1 || true
+    WINEDEBUG=-all wine reg add 'HKLM\Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\FontSubstitutes' /v "$font_substitute" /d 'SimSun' /f >/dev/null 2>&1 || true
+  done
+}
+
+if [[ ! -e "$WINEPREFIX/system.reg" || ! -e "$stamp" || "$regfile" -nt "$stamp" ]]; then
+  init_wine_gbk_prefix
+
+  tmp_reg="$(mktemp --suffix=.reg)"
+  trap 'rm -f "$tmp_reg"' EXIT
+  {
+    printf '\xff\xfe'
+    iconv -f UTF-8 -t UTF-16LE "$regfile"
+  } > "$tmp_reg"
+  WINEDEBUG=-all wine regedit /S "$tmp_reg" || true
+  WINEDEBUG=-all wine reg delete 'HKCU\Software\Wine\Fonts\Cache' /f || true
+  WINEDEBUG=-all wine reg add 'HKCU\Software\Wine\Fonts' /v 'Codepages' /d '936,1252,437' /f || true
+  for font_substitute in 'MS Shell Dlg' 'MS Shell Dlg 2' 'System' 'Tahoma' 'MS Sans Serif'; do
+    WINEDEBUG=-all wine reg add 'HKLM\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes' /v "$font_substitute" /d 'SimSun' /f || true
+    WINEDEBUG=-all wine reg add 'HKLM\Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\FontSubstitutes' /v "$font_substitute" /d 'SimSun' /f || true
+  done
+  rm -f "$tmp_reg"
+  trap - EXIT
+  : > "$stamp"
+fi
+
+ensure_wine_gbk_runtime_registry
+
+if [[ "${WINE_GBK_FONTFIX:-0}" == "1" && $# -gt 0 && -e "$fontfix_dll" && -e "$fontfix_launcher" ]]; then
+  target="$1"
+  target_lc="${target,,}"
+  case "$target_lc" in
+    *.exe|*.scr|*.com)
+      if [[ -e "$target" ]]; then
+        target_win="$(WINEDEBUG=-all winepath -w "$target" 2>/dev/null || printf '%s' "$target")"
+      else
+        target_win="$target"
+      fi
+      fontfix_win="Z:${fontfix_dll//\//\\}"
+      shift
+      exec wine "$fontfix_launcher" "$fontfix_win" "$target_win" "$@"
+      ;;
+  esac
+fi
+
+exec wine "$@"

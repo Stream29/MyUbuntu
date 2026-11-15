@@ -1,0 +1,19 @@
+[Unit]
+Description=Kodex desktop notification broker
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=io.github.stream29.Kodex.NotificationBroker
+ExecStart=/usr/bin/gjs -m /home/stream/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/kodex-notification-broker
+Restart=on-failure
+RestartSec=1s
+TimeoutStartSec=10s
+TimeoutStopSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+payload=''
+IFS= read -r -d '' payload || true
+event_type="$(/usr/bin/jq -r '
+  if (.type | type) == "string" then .type
+  else error("Expected a Kodex notification event")
+  end
+' <<<"$payload")"
+
+case "$event_type" in
+  stop_assistant_message)
+    message="$(/usr/bin/jq -r '
+      if (.message | type) == "object"
+      then [(.message.content // [])[] | select(.text? != null) | .text] | join("")
+      else ""
+      end
+    ' <<<"$payload")"
+    body=$'assistant_message\n\n'"${message:-Turn complete}"
+    ;;
+  stop_request_user_input)
+    questions="$(/usr/bin/jq -r '
+      [
+        .requests[]?.arguments.questions[]?
+        | "- "
+          + (if (.header // "") == ""
+             then (.question // "未提供问题")
+             else (.header + ": " + (.question // "未提供问题"))
+             end)
+          + (if ((.options? | type) == "array") and ((.options | length) > 0)
+             then "（选项：" + ([.options[]?.label] | join(" / ")) + "）"
+             else ""
+             end)
+      ] | join("\n")
+    ' <<<"$payload")"
+    body=$'request_user_input\n\n'"${questions:-请打开 Kodex 查看具体问题}"
+    ;;
+  stop_suggest_subagent)
+    tasks="$(/usr/bin/jq -r '
+      [
+        .requests[]?.arguments.tasks[]?
+        | "- " + (.name // "未命名任务") + ": " + (.prompt // "未提供任务描述")
+      ] | join("\n")
+    ' <<<"$payload")"
+    body=$'suggest_subagent\n\n'"${tasks:-请打开 Kodex 查看具体任务}"
+    ;;
+  stop_unhandled_error|unhandled_error)
+    message="$(/usr/bin/jq -r '.message // ""' <<<"$payload")"
+    body=$'unhandled_error\n\n'"${message:-异常未提供 message}"
+    ;;
+  *)
+    printf 'Expected a supported Kodex notification event, got: %s\n' "$event_type" >&2
+    exit 2
+    ;;
+esac
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${UID}}"
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "$runtime_dir/bus" ]]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+fi
+
+broker_name="io.github.stream29.Kodex.NotificationBroker"
+broker_path="/io/github/stream29/Kodex/NotificationBroker"
+broker_interface="io.github.stream29.Kodex.NotificationBroker"
+
+if /usr/bin/busctl --user --timeout=6s call \
+  "$broker_name" \
+  "$broker_path" \
+  "$broker_interface" \
+  Notify \
+  s \
+  "$body" \
+  >/dev/null 2>&1; then
+  :
+else
+  escaped_body="$(printf '%s' "$body" | /usr/bin/jq -Rrs '@html')"
+  /usr/bin/notify-send \
+    --app-name=Kodex \
+    --icon=utilities-terminal \
+    --hint=string:desktop-entry:io.github.stream29.Kodex \
+    --urgency=normal \
+    -- \
+    "Kodex" \
+    "$escaped_body" \
+    >/dev/null
+fi

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+
+set -u
+
+readonly RESURRECT_DIR="${HOME}/.local/share/tmux/resurrect"
+readonly LAST_LINK="${RESURRECT_DIR}/last"
+readonly SAVE_SCRIPT="${HOME}/.config/tmux/plugins/tmux-resurrect/scripts/save.sh"
+
+if ! /usr/bin/tmux has-session >/dev/null 2>&1; then
+    exit 0
+fi
+
+previous_snapshot=$(/usr/bin/readlink -f "${LAST_LINK}" 2>/dev/null || true)
+
+"${SAVE_SCRIPT}"
+
+new_snapshot=$(/usr/bin/readlink -f "${LAST_LINK}" 2>/dev/null || true)
+if [ -n "${new_snapshot}" ] && [ -s "${new_snapshot}" ]; then
+    exit 0
+fi
+
+if [ -n "${previous_snapshot}" ] && [ -s "${previous_snapshot}" ]; then
+    if [ -n "${new_snapshot}" ] &&
+       [ "${new_snapshot}" != "${previous_snapshot}" ]; then
+        /usr/bin/rm -f -- "${new_snapshot}"
+    fi
+    /usr/bin/ln -sfn -- "$(/usr/bin/basename "${previous_snapshot}")" \
+        "${LAST_LINK}"
+    printf '%s\n' \
+        'tmux-resurrect-save-safe: rejected an empty snapshot; kept the previous snapshot.' \
+        >&2
+    exit 0
+fi
+
+printf '%s\n' \
+    'tmux-resurrect-save-safe: save produced an empty snapshot and no valid previous snapshot exists.' \
+    >&2
+exit 1

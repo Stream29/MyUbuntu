@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    printf 'Usage: wine-nwjs Game.exe [extra nw.js flags or args...]\n' >&2
+    exit 2
+fi
+
+exe=$1
+shift
+
+flags=(
+    --use-gl=angle
+    --use-angle=d3d11
+    --disable-direct-composition
+    --disable-gpu-compositing
+    --ignore-gpu-blocklist
+)
+
+# Prefer XWayland for Wine windows so the desktop can provide normal decorations.
+# Use DXVK for GPU-rendered WebGL while avoiding the broken GPU presentation path.
+wine_command=(
+    env -u WAYLAND_DISPLAY
+    XDG_SESSION_TYPE=x11
+    ENABLE_GAMESCOPE_WSI=0
+    WINEDLLOVERRIDES=d3d11,dxgi=n
+    wine "$exe" "${flags[@]}" "$@"
+)
+
+# Gamescope's reaper can wait forever for Wine services that ignore SIGTERM.
+# Keep direct Wine launches unchanged and scope forced cleanup to this reaper.
+parent_name=
+if [[ -r "/proc/$PPID/comm" ]]; then
+    read -r parent_name < "/proc/$PPID/comm" || true
+fi
+
+if [[ "$parent_name" != gamescopereaper ]]; then
+    exec "${wine_command[@]}"
+fi
+
+reaper_pid=$PPID
+cleanup_gamescope_instance() {
+    trap - HUP INT QUIT TERM
+    pkill -KILL -P "$reaper_pid" 2>/dev/null || true
+    exit 143
+}
+
+trap cleanup_gamescope_instance HUP INT QUIT TERM
+"${wine_command[@]}" &
+wine_pid=$!
+status=0
+wait "$wine_pid" || status=$?
+trap - HUP INT QUIT TERM
+pkill -KILL -P "$reaper_pid" 2>/dev/null || true
+exit "$status"

@@ -1,0 +1,6 @@
+LIBSYSTEMD_209 {
+    global:
+        sd_session_get_type;
+    local:
+        *;
+};

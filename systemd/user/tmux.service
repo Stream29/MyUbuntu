@@ -1,0 +1,23 @@
+[Unit]
+Description=tmux home session (detached)
+Documentation=man:tmux(1)
+
+[Service]
+# tmux daemonizes itself, so track the unit rather than a transient daemon PID.
+# This keeps ExecStop ordered before systemd tears down the tmux process group.
+Type=oneshot
+RemainAfterExit=yes
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_SESSION_TYPE=wayland
+ExecStart=/usr/bin/tmux new-session -d -s home
+
+# Never replace the last good resurrect snapshot with an empty shutdown save.
+ExecStop=/home/stream/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/tmux-resurrect-save-safe
+ExecStop=-/usr/bin/tmux kill-server
+KillMode=control-group
+
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,243 @@
+#!/usr/bin/python3
+"""GNOME-local lock policy and a shared, lifetime-bound Caffeine sleep blocker.
+
+Ubuntu's native ubuntu-lock-on-suspend handles locking. This service only waits
+for its acknowledgement, including when GNOME is the inactive VT.
+"""
+
+import logging
+import os
+import signal
+import time
+
+import gi
+
+gi.require_version("GLibUnix", "2.0")
+from gi.repository import Gio, GLib, GLibUnix
+
+LOG = logging.getLogger("caffeine-lock-sync")
+LOGIN = "org.freedesktop.login1"
+MANAGER_PATH = "/org/freedesktop/login1"
+SESSION = "org.gnome.SessionManager"
+SESSION_PATH = "/org/gnome/SessionManager"
+SAVER = "org.gnome.ScreenSaver"
+SAVER_PATH = "/org/gnome/ScreenSaver"
+SHELL = "org.gnome.Shell"
+
+
+def lock_enabled(caffeine, locked, preparing, shell_alive):
+    # Keep crash-relock enabled whenever a session is locked or Shell is unavailable.
+    return not caffeine or locked or preparing or not shell_alive
+
+
+class DesktopPolicy:
+    def __init__(self):
+        self.session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.settings = Gio.Settings.new("org.gnome.desktop.screensaver")
+        if not self.settings.get_boolean("ubuntu-lock-on-suspend"):
+            raise RuntimeError("Enable GNOME ubuntu-lock-on-suspend before starting this service")
+        self.loop = GLib.MainLoop()
+        self.block_fd = None
+        self.delay_fd = None
+        self.sleep_pending = False
+        self.deadline = 0
+        self.sleep_session = None
+        self.last_state = None
+        self.refresh_queued = False
+        self.closed = False
+
+    @staticmethod
+    def call(bus, name, path, interface, method, signature=None, values=()):
+        return bus.call_sync(
+            name, path, interface, method,
+            GLib.Variant(signature, values) if signature else None, None,
+            Gio.DBusCallFlags.NO_AUTO_START, 1000, None,
+        ).unpack()
+
+    def owns(self, name):
+        return self.call(
+            self.session, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "NameHasOwner", "(s)", (name,),
+        )[0]
+
+    def properties(self, path):
+        return self.call(
+            self.system, LOGIN, path, "org.freedesktop.DBus.Properties",
+            "GetAll", "(s)", (f"{LOGIN}.Session",),
+        )[0]
+
+    def gnome_session(self):
+        matches = []
+        for _, uid, _, _, path in self.call(
+            self.system, LOGIN, MANAGER_PATH, f"{LOGIN}.Manager", "ListSessions"
+        )[0]:
+            if uid != os.getuid():
+                continue
+            props = self.properties(path)
+            service = props.get("Service") or ""
+            if (service.startswith("gdm-")
+                    and service != "gdm-launch-environment"
+                    and props.get("Type") in ("wayland", "x11")
+                    and not props.get("Remote")
+                    and props.get("Class") == "user"):
+                matches.append((path, props))
+        if len(matches) > 1:
+            raise RuntimeError("Ambiguous GNOME session; refusing to guess")
+        return matches[0] if matches else (None, {})
+
+    def caffeine_active(self):
+        if not all(self.owns(name) for name in (SESSION, SHELL, SAVER)):
+            return False
+        paths = self.call(self.session, SESSION, SESSION_PATH, SESSION, "GetInhibitors")[0]
+        return any(
+            self.call(self.session, SESSION, path, f"{SESSION}.Inhibitor", "GetAppId")[0]
+            == "caffeine-gnome-extension"
+            for path in paths
+        )
+
+    def inhibit(self, mode):
+        result, descriptors = self.system.call_with_unix_fd_list_sync(
+            LOGIN, MANAGER_PATH, f"{LOGIN}.Manager", "Inhibit",
+            GLib.Variant("(ssss)", (
+                "sleep", "DeviceManagement GNOME/Caffeine",
+                "Caffeine: prevent suspend across VTs" if mode == "block"
+                else "GNOME: finish locking before sleep",
+                mode,
+            )), GLib.VariantType.new("(h)"), Gio.DBusCallFlags.NONE, 1000, None, None,
+        )
+        return descriptors.get(result.unpack()[0])
+
+    def release(self, attribute):
+        fd = getattr(self, attribute)
+        if fd is not None:
+            os.close(fd)
+            setattr(self, attribute, None)
+
+    def set_lock_enabled(self, enabled):
+        if self.settings.get_boolean("lock-enabled") != enabled:
+            if not self.settings.set_boolean("lock-enabled", enabled):
+                raise RuntimeError("Cannot set GNOME lock-enabled")
+            Gio.Settings.sync()
+
+    def refresh(self):
+        self.refresh_queued = False
+        try:
+            path, props = self.gnome_session()
+            alive = bool(path and self.owns(SHELL) and self.owns(SAVER))
+            active = bool(alive and self.caffeine_active())
+            locked = bool(props.get("LockedHint", False))
+            self.set_lock_enabled(lock_enabled(active, locked, self.sleep_pending, alive))
+            if active and self.block_fd is None:
+                self.block_fd = self.inhibit("block")
+            elif not active:
+                self.release("block_fd")
+            if alive and not self.sleep_pending and self.delay_fd is None:
+                self.delay_fd = self.inhibit("delay")
+            elif not alive:
+                self.release("delay_fd")
+            state = (active, locked, alive, self.sleep_pending)
+            if state != self.last_state:
+                LOG.info("caffeine=%s gnome_locked=%s gnome_alive=%s preparing_sleep=%s", *state)
+                self.last_state = state
+        except Exception:
+            LOG.exception("Policy refresh failed; restoring lock protection and releasing Caffeine")
+            self.release("block_fd")
+            self.set_lock_enabled(True)
+        return GLib.SOURCE_REMOVE
+
+    def changed(self, *args):
+        if not self.refresh_queued and not self.closed:
+            self.refresh_queued = True
+            GLib.idle_add(self.refresh)
+
+    def sleep_changed(self, bus, sender, path, interface, name, parameters, data):
+        going_down = parameters.unpack()[0]
+        if not going_down:
+            self.sleep_pending = False
+            self.sleep_session = None
+            self.refresh()
+            return
+        if self.sleep_pending:
+            return
+        self.sleep_pending = True
+        try:
+            self.sleep_session, props = self.gnome_session()
+            self.set_lock_enabled(True)
+            if not self.sleep_session or not self.owns(SAVER):
+                raise RuntimeError("GNOME disappeared before sleep")
+            if props.get("LockedHint"):
+                self.finish_sleep()
+                return
+            # Ubuntu GNOME handles PrepareForSleep itself. Never forward Lock
+            # to another desktop or duplicate the native GNOME Lock request.
+            self.deadline = time.monotonic() + 4
+            GLib.timeout_add(50, self.wait_for_lock)
+        except Exception:
+            LOG.exception("GNOME sleep lock failed; delay remains held until resume")
+
+    def wait_for_lock(self):
+        if not self.sleep_pending:
+            return GLib.SOURCE_REMOVE
+        try:
+            if self.properties(self.sleep_session).get("LockedHint"):
+                self.finish_sleep()
+                return GLib.SOURCE_REMOVE
+        except Exception:
+            LOG.exception("Cannot confirm GNOME sleep lock")
+        if time.monotonic() >= self.deadline:
+            LOG.error("GNOME did not confirm locking; logind delay is bounded, verify locally")
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def finish_sleep(self):
+        LOG.info("GNOME sleep lock confirmed")
+        self.release("delay_fd")
+
+    def close(self, *unused):
+        self.closed = True
+        self.release("block_fd")
+        self.release("delay_fd")
+        self.set_lock_enabled(True)
+        self.loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    def run(self):
+        subscriptions = []
+        try:
+            for name in (SESSION, SHELL, SAVER):
+                subscriptions.append((self.session, self.session.signal_subscribe(
+                    "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                    "/org/freedesktop/DBus", name, Gio.DBusSignalFlags.NONE,
+                    self.changed, None,
+                )))
+            subscriptions.append((self.session, self.session.signal_subscribe(
+                SESSION, SESSION, None, SESSION_PATH, None,
+                Gio.DBusSignalFlags.NONE, self.changed, None,
+            )))
+            subscriptions.append((self.system, self.system.signal_subscribe(
+                LOGIN, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                None, f"{LOGIN}.Session", Gio.DBusSignalFlags.NONE, self.changed, None,
+            )))
+            subscriptions.append((self.system, self.system.signal_subscribe(
+                LOGIN, f"{LOGIN}.Manager", "PrepareForSleep", MANAGER_PATH, None,
+                Gio.DBusSignalFlags.NONE, self.sleep_changed, None,
+            )))
+            # Catch session creation/removal even if graphical-session.target survives.
+            subscriptions.append((self.system, self.system.signal_subscribe(
+                LOGIN, f"{LOGIN}.Manager", None, MANAGER_PATH, None,
+                Gio.DBusSignalFlags.NONE, self.changed, None,
+            )))
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, self.close)
+            self.refresh()
+            self.loop.run()
+        finally:
+            for bus, subscription in subscriptions:
+                bus.signal_unsubscribe(subscription)
+            self.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    DesktopPolicy().run()

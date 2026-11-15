@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Interactive Sway screenshot helper using grim, slurp, jq, and swappy.
+# Usage:
+#   sway-screenshot [annotate|clipboard]
+
+mode="${1:-annotate}"
+
+# Avoid overlapping slurp pointer/keyboard grabs if triggered twice.
+if pgrep -u "$USER" -x slurp >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Collect visible window rectangles so slurp supports both click-to-select-window and drag-to-select-region.
+windows="$(swaymsg -t get_tree | jq -r '.. | select(.pid? and .visible?) | .rect | "\(.x),\(.y) \(.width)x\(.height)"')"
+
+# Exit cleanly if the user cancels selection with Esc.
+if ! geometry="$(printf '%s\n' "$windows" | slurp)"; then
+    exit 0
+fi
+
+if [[ -z "$geometry" ]]; then
+    exit 0
+fi
+
+case "$mode" in
+    annotate)
+        tmpfile="$(mktemp --suffix=.png)"
+        fs_con_id="$(swaymsg -t get_tree | jq -r '[.. | select(.focused? and .fullscreen_mode? != 0) | .id] | first // empty')"
+
+        cleanup() {
+            rm -f "$tmpfile"
+            if [[ -n "$fs_con_id" ]]; then
+                swaymsg "[con_id=$fs_con_id] fullscreen enable" >/dev/null 2>&1 || true
+            fi
+        }
+        trap cleanup EXIT
+
+        grim -g "$geometry" "$tmpfile"
+
+        # Temporarily exit fullscreen on the background window so swappy opens as a normal floating window without hiding swaybar.
+        if [[ -n "$fs_con_id" ]]; then
+            swaymsg "[con_id=$fs_con_id] fullscreen disable" >/dev/null 2>&1 || true
+        fi
+
+        swappy -f "$tmpfile"
+        ;;
+    clipboard)
+        grim -g "$geometry" - | wl-copy -t image/png
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "sway-screenshot" "Screenshot copied" "Selection copied to clipboard."
+        fi
+        ;;
+    *)
+        printf 'Usage: %s [annotate|clipboard]\n' "$0" >&2
+        exit 2
+        ;;
+esac

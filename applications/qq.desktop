@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=QQ
+Exec=/home/stream/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/qq-toggle %U
+Terminal=false
+Type=Application
+Icon=/usr/share/icons/hicolor/512x512/apps/qq.png
+StartupWMClass=QQ
+Categories=Network;
+Comment=Tencent QQ

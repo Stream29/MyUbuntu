@@ -1,0 +1,187 @@
+#!/usr/bin/python3
+"""Per-compositor lock broker. No idle timers and no cross-desktop commands."""
+
+import argparse
+import asyncio
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import signal
+import sys
+
+
+def runtime_directory():
+    compositor = os.environ.get("SWAYSOCK", "")
+    if not compositor or not os.environ.get("WAYLAND_DISPLAY"):
+        raise RuntimeError("Run inside the intended Sway session (SWAYSOCK and WAYLAND_DISPLAY required)")
+    root = Path(os.environ["XDG_RUNTIME_DIR"]) / "sway-session-lock"
+    directory = root / hashlib.sha256(compositor.encode()).hexdigest()[:16]
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    root.chmod(0o700)
+    directory.chmod(0o700)
+    return directory
+
+
+class LockBroker:
+    def __init__(self, command=None, ready_timeout=4):
+        self.command = command or [
+            "/usr/bin/swaylock", "--config", "/dev/null", "--color", "151922",
+            "--show-keyboard-layout", "--indicator-caps-lock",
+        ]
+        self.ready_timeout = ready_timeout
+        self.process = None
+        self.ready = False
+        self.mutex = asyncio.Lock()
+
+    async def lock(self):
+        async with self.mutex:
+            if self.process is not None and self.process.returncode is None:
+                if not self.ready:
+                    raise RuntimeError("Existing locker has not confirmed readiness")
+                return
+            self.ready = False
+            read_fd, write_fd = os.pipe()
+            pipe = os.fdopen(read_fd, "rb", buffering=0)
+            reader = asyncio.StreamReader()
+            transport = None
+            try:
+                transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+                    lambda: asyncio.StreamReaderProtocol(reader), pipe
+                )
+                self.process = await asyncio.create_subprocess_exec(
+                    *self.command, "--ready-fd", str(write_fd),
+                    pass_fds=(write_fd,), start_new_session=True,
+                )
+                os.close(write_fd)
+                write_fd = -1
+                message = await asyncio.wait_for(reader.readline(), self.ready_timeout)
+                if message != b"\n" or self.process.returncode is not None:
+                    raise RuntimeError("swaylock exited without confirming a secure lock")
+                self.ready = True
+                print("Sway lock confirmed by compositor", flush=True)
+            finally:
+                if write_fd >= 0:
+                    os.close(write_fd)
+                if transport:
+                    transport.close()
+                else:
+                    pipe.close()
+            # Never kill an unresponsive locker: the compositor may already be locked.
+
+    async def handle(self, reader, writer):
+        try:
+            command = await asyncio.wait_for(reader.readline(), 2)
+            if command == b"lock\n":
+                await self.lock()
+                response = {"ok": True, "locked": True}
+            elif command == b"status\n":
+                response = {
+                    "ok": True,
+                    "locked": bool(self.ready and self.process and self.process.returncode is None),
+                    "pid": os.getpid(),
+                    "session": os.environ.get("XDG_SESSION_ID"),
+                    "wayland": os.environ.get("WAYLAND_DISPLAY"),
+                    "swaysock": os.environ.get("SWAYSOCK"),
+                }
+            else:
+                raise RuntimeError("Unknown request")
+        except Exception as error:
+            print(f"Lock request failed: {error}", file=sys.stderr, flush=True)
+            response = {"ok": False, "error": str(error)}
+        try:
+            writer.write(json.dumps(response).encode() + b"\n")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+async def request(directory, command):
+    reader, writer = await asyncio.open_unix_connection(str(directory / "broker.sock"))
+    try:
+        writer.write(command.encode() + b"\n")
+        await writer.drain()
+        response = json.loads(await asyncio.wait_for(reader.readline(), 6))
+        print(json.dumps(response, ensure_ascii=False))
+        if not response["ok"]:
+            raise RuntimeError(response["error"])
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def watch(directory):
+    # Retain this FD for the complete watcher lifetime. Append never truncates state.
+    with (directory / "watch.lock").open("a") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        socket_path = directory / "broker.sock"
+        socket_path.unlink(missing_ok=True)
+        broker = LockBroker()
+        server = await asyncio.start_unix_server(broker.handle, path=str(socket_path))
+        socket_path.chmod(0o600)
+        command = shlex.join([sys.executable, str(Path(__file__).resolve()), "lock"])
+        idle = None
+        shutdown = None
+        try:
+            idle = await asyncio.create_subprocess_exec(
+                "/usr/bin/swayidle", "-w", "-C", "/dev/null",
+                "lock", command, "before-sleep", command,
+            )
+            shutdown = await asyncio.create_subprocess_exec(
+                "/usr/bin/swaymsg", "--monitor", "--type", "subscribe", '["shutdown"]',
+                stdout=asyncio.subprocess.PIPE,
+            )
+            stopped = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                loop.add_signal_handler(sig, stopped.set)
+
+            async def compositor_shutdown():
+                while line := await shutdown.stdout.readline():
+                    event = json.loads(line)
+                    if isinstance(event, dict) and "change" in event:
+                        return
+
+            tasks = [
+                asyncio.create_task(idle.wait()),
+                asyncio.create_task(compositor_shutdown()),
+                asyncio.create_task(stopped.wait()),
+            ]
+            print(f"Sway lock listener ready: {os.environ['SWAYSOCK']}", flush=True)
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            server.close()
+            await server.wait_closed()
+            for child in (idle, shutdown):
+                if child and child.returncode is None:
+                    child.terminate()
+                    await child.wait()
+            socket_path.unlink(missing_ok=True)
+            # Intentionally leave an active swaylock alive on listener termination.
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("watch", "lock", "status"))
+    args = parser.parse_args()
+    directory = runtime_directory()
+    asyncio.run(watch(directory) if args.command == "watch" else request(directory, args.command))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, asyncio.TimeoutError) as error:
+        print(f"sway-session-lock: {error}", file=sys.stderr)
+        sys.exit(1)

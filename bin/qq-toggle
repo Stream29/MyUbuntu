@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+activate_running_qq() {
+  command -v busctl >/dev/null 2>&1 || return 1
+
+  local item bus_name object_path
+  while IFS= read -r item; do
+    bus_name=${item%%/*}
+    bus_name=${bus_name%@}
+    object_path=/${item#*/}
+
+    if busctl --user list 2>/dev/null |
+      awk -v name="$bus_name" '$1 == name && $3 == "qq" { found = 1 } END { exit !found }'; then
+      if busctl --user call "$bus_name" "$object_path" \
+        org.kde.StatusNotifierItem Activate ii 0 0 >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+  done < <(
+    busctl --user call org.kde.StatusNotifierWatcher /StatusNotifierWatcher \
+      org.freedesktop.DBus.Properties Get ss \
+      org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems 2>/dev/null |
+      tr '"' '\n' |
+      awk '/^[^/]+\/StatusNotifierItem$/'
+  )
+
+  return 1
+}
+
+# When opening a URL/file, preserve the package launcher's argument handling.
+# For a plain click, prefer activating the already registered tray instance.
+if (($# == 0)) && activate_running_qq; then
+  exit 0
+fi
+
+export CHROME_DESKTOP=qq.desktop
+exec /opt/QQ/qq "$@"

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+export LC_ALL=C
+
+readonly UPOWER_BUS_NAME="org.freedesktop.UPower"
+readonly UPOWER_OBJECT_PATH="/org/freedesktop/UPower"
+readonly UPOWER_INTERFACE="org.freedesktop.UPower"
+
+last_power_source=""
+
+read_power_source() {
+    local on_battery
+
+    on_battery="$(
+        gdbus call \
+            --system \
+            --dest "$UPOWER_BUS_NAME" \
+            --object-path "$UPOWER_OBJECT_PATH" \
+            --method org.freedesktop.DBus.Properties.Get \
+            "$UPOWER_INTERFACE" \
+            OnBattery
+    )"
+
+    case "$on_battery" in
+        '(<true>,)')
+            printf '%s\n' battery
+            ;;
+        '(<false>,)')
+            printf '%s\n' ac
+            ;;
+        *)
+            printf 'Unexpected UPower OnBattery value: %s\n' "$on_battery" >&2
+            return 1
+            ;;
+    esac
+}
+
+apply_profile() {
+    local power_source target_profile current_profile
+
+    power_source="$(read_power_source)"
+    if [[ "$power_source" == "$last_power_source" ]]; then
+        return
+    fi
+
+    case "$power_source" in
+        ac)
+            target_profile=performance
+            ;;
+        battery)
+            target_profile=power-saver
+            ;;
+    esac
+
+    current_profile="$(powerprofilesctl get)"
+    if [[ "$current_profile" != "$target_profile" ]]; then
+        powerprofilesctl set "$target_profile"
+    fi
+
+    last_power_source="$power_source"
+    printf 'Power source: %s; profile: %s\n' "$power_source" "$target_profile"
+}
+
+apply_profile
+
+upower --monitor | while IFS= read -r _; do
+    apply_profile
+done

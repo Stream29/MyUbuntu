@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Bidirectional clipboard synchronizer between GNOME (Xwayland :0) and Sway (Wayland).
+
+GNOME Wayland restricts background wl-paste when unfocused, but its internal
+Xwayland instance (:0) continuously mirrors the desktop clipboard.
+X11 supports non-polling, event-driven XFixes notifications.
+
+This daemon:
+  1. Captures GNOME copies via XFixes on DISPLAY=:0 and pushes them to Sway via wl-copy.
+  2. Captures Sway copies via wl-paste --watch and claims/serves CLIPBOARD on DISPLAY=:0.
+  3. Uses content hashing to prevent ping-pong loops.
+"""
+
+import fcntl
+import glob
+import hashlib
+import os
+import select
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+from Xlib import X, Xatom, display
+from Xlib.ext import xfixes
+from Xlib.protocol import event
+
+UID = os.getuid()
+SOCK_PATH = f"/run/user/{UID}/sway-gnome-clipboard.sock"
+LOCK_PATH = f"/run/user/{UID}/sway-gnome-clipboard.lock"
+GNOME_DISPLAY = os.environ.get("GNOME_DISPLAY", ":0")
+SWAY_WAYLAND = os.environ.get("SWAY_WAYLAND", os.environ.get("WAYLAND_DISPLAY", "wayland-1"))
+
+
+def get_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def notify_sway_helper():
+    """Helper invoked by `wl-paste --watch` whenever Sway clipboard changes."""
+    try:
+        data = sys.stdin.buffer.read()
+        if data and os.path.exists(SOCK_PATH):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+                s.sendto(data, SOCK_PATH)
+    except Exception:
+        pass
+    sys.exit(0)
+
+
+def ensure_xauthority():
+    """Ensure XAUTHORITY is set for GNOME's Xwayland."""
+    current = os.environ.get("XAUTHORITY")
+    if current and os.path.exists(current):
+        return
+    auth_pattern = f"/run/user/{UID}/.mutter-Xwaylandauth.*"
+    auth_files = sorted(glob.glob(auth_pattern), key=os.path.getmtime, reverse=True)
+    if auth_files:
+        os.environ["XAUTHORITY"] = auth_files[0]
+        return
+    default_xauth = os.path.expanduser("~/.Xauthority")
+    if os.path.exists(default_xauth):
+        os.environ["XAUTHORITY"] = default_xauth
+
+
+class ClipboardBridge:
+    def __init__(self):
+        self.running = True
+        self.last_hash = None
+        self.current_data = b""
+
+        self.sock = None
+        self.watcher_proc = None
+
+        self.d = None
+        self.root = None
+        self.w = None
+
+        self.clip = None
+        self.targets = None
+        self.utf8 = None
+        self.string = None
+        self.text_atom = None
+        self.text_plain = None
+        self.text_plain_utf8 = None
+        self.timestamp = None
+        self.prop = None
+
+    def setup_socket(self):
+        if os.path.exists(SOCK_PATH):
+            try:
+                os.unlink(SOCK_PATH)
+            except OSError:
+                pass
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.sock.bind(SOCK_PATH)
+        self.sock.setblocking(False)
+
+    def setup_x11(self):
+        while self.running:
+            try:
+                ensure_xauthority()
+                self.d = display.Display(GNOME_DISPLAY)
+                self.d.set_error_handler(lambda *args: None)
+                self.d.xfixes_query_version()
+                self.root = self.d.screen().root
+                self.w = self.root.create_window(0, 0, 1, 1, 0, X.CopyFromParent)
+
+                self.clip = self.d.intern_atom("CLIPBOARD")
+                self.targets = self.d.intern_atom("TARGETS")
+                self.utf8 = self.d.intern_atom("UTF8_STRING")
+                self.string = self.d.intern_atom("STRING")
+                self.text_atom = self.d.intern_atom("TEXT")
+                self.text_plain = self.d.intern_atom("text/plain")
+                self.text_plain_utf8 = self.d.intern_atom("text/plain;charset=utf-8")
+                self.timestamp = self.d.intern_atom("TIMESTAMP")
+                self.prop = self.d.intern_atom("SWAY_GNOME_SYNC_PROP")
+
+                self.d.xfixes_select_selection_input(
+                    self.root, self.clip, xfixes.XFixesSetSelectionOwnerNotifyMask
+                )
+                self.d.flush()
+                return True
+            except Exception:
+                time.sleep(2.0)
+        return False
+
+    def start_sway_watcher(self):
+        env = dict(os.environ, WAYLAND_DISPLAY=SWAY_WAYLAND)
+        script_path = os.path.abspath(__file__)
+        try:
+            self.watcher_proc = subprocess.Popen(
+                ["wl-paste", "--watch", script_path, "--notify-sway"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    def copy_to_sway(self, data: bytes):
+        if not data:
+            return
+        h = get_hash(data)
+        if h == self.last_hash:
+            return
+        self.last_hash = h
+        self.current_data = data
+
+        env = dict(os.environ, WAYLAND_DISPLAY=SWAY_WAYLAND)
+        try:
+            subprocess.run(
+                ["wl-copy"],
+                input=data,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+        except Exception:
+            pass
+
+    def run(self):
+        self.setup_socket()
+        if not self.setup_x11():
+            return
+
+        self.start_sway_watcher()
+
+        while self.running:
+            try:
+                # Restart Sway watcher if it crashed
+                if self.watcher_proc and self.watcher_proc.poll() is not None:
+                    self.start_sway_watcher()
+
+                # Event loop waiting on either X11 display socket or Sway datagram socket
+                r, _, _ = select.select([self.d.fileno(), self.sock.fileno()], [], [], 0.5)
+
+                if self.sock.fileno() in r:
+                    try:
+                        data, _ = self.sock.recvfrom(1048576)  # up to 1MB clipboard
+                        if data:
+                            h = get_hash(data)
+                            if h != self.last_hash:
+                                self.last_hash = h
+                                self.current_data = data
+                                self.w.set_selection_owner(self.clip, X.CurrentTime)
+                                self.d.flush()
+                    except (BlockingIOError, socket.error):
+                        pass
+
+                # Process all pending X11 events
+                while self.d.pending_events():
+                    ev = self.d.next_event()
+                    ev_type_name = type(ev).__name__
+
+                    if ev_type_name == "SetSelectionOwnerNotify":
+                        # Clipboard ownership changed in GNOME
+                        owner = getattr(ev, "owner", None)
+                        owner_id = getattr(owner, "id", None) if owner else None
+                        if (
+                            owner
+                            and owner != self.w
+                            and owner != self.w.id
+                            and owner_id != self.w.id
+                        ):
+                            self.w.convert_selection(
+                                self.clip, self.utf8, self.prop, X.CurrentTime
+                            )
+                            self.d.flush()
+
+                    elif getattr(ev, "type", None) == X.SelectionNotify:
+                        # Received converted clipboard data from GNOME
+                        if ev.property == self.prop:
+                            res = self.w.get_full_property(self.prop, X.AnyPropertyType)
+                            self.w.delete_property(self.prop)
+                            self.d.flush()
+
+                            if res and res.value:
+                                val = res.value
+                                if isinstance(val, str):
+                                    val = val.encode("utf-8")
+                                elif not isinstance(val, (bytes, bytearray)):
+                                    val = bytes(val)
+                                self.copy_to_sway(val)
+
+                    elif getattr(ev, "type", None) == X.SelectionRequest:
+                        # A GNOME/X11 application requested paste
+                        target = ev.target
+                        req_prop = ev.property if ev.property != X.NONE else target
+
+                        if target == self.targets:
+                            ev.requestor.change_property(
+                                req_prop,
+                                Xatom.ATOM,
+                                32,
+                                [
+                                    self.targets,
+                                    self.utf8,
+                                    self.string,
+                                    self.text_atom,
+                                    self.text_plain,
+                                    self.text_plain_utf8,
+                                ],
+                            )
+                        elif target in [
+                            self.utf8,
+                            self.string,
+                            self.text_atom,
+                            self.text_plain,
+                            self.text_plain_utf8,
+                        ]:
+                            ev.requestor.change_property(
+                                req_prop,
+                                target,
+                                8,
+                                self.current_data,
+                            )
+                        elif target == self.timestamp:
+                            ev.requestor.change_property(
+                                req_prop,
+                                Xatom.INTEGER,
+                                32,
+                                [ev.time],
+                            )
+                        else:
+                            req_prop = X.NONE
+
+                        resp = event.SelectionNotify(
+                            time=ev.time,
+                            requestor=ev.requestor,
+                            selection=ev.selection,
+                            target=ev.target,
+                            property=req_prop,
+                        )
+                        ev.requestor.send_event(resp)
+                        self.d.flush()
+
+            except Exception:
+                time.sleep(1.0)
+                try:
+                    self.setup_x11()
+                except Exception:
+                    pass
+
+    def cleanup(self):
+        self.running = False
+        if self.watcher_proc:
+            try:
+                self.watcher_proc.terminate()
+            except Exception:
+                pass
+        if os.path.exists(SOCK_PATH):
+            try:
+                os.unlink(SOCK_PATH)
+            except OSError:
+                pass
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--notify-sway":
+        notify_sway_helper()
+
+    lock_fd = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        sys.exit(0)
+
+    bridge = ClipboardBridge()
+
+    def handle_signal(sig, frame):
+        bridge.cleanup()
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    try:
+        bridge.run()
+    finally:
+        bridge.cleanup()
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

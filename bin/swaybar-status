@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+
+set -u
+export LC_ALL=C
+
+PREV_CPU_TOTAL=0
+PREV_CPU_IDLE=0
+
+read_cpu() {
+    local _cpu user nice system idle iowait irq softirq steal _rest
+    if ! IFS=' ' read -r _cpu user nice system idle iowait irq softirq steal _rest < /proc/stat; then
+        printf 'CPU --%%'
+        return
+    fi
+
+    local idle_all=$((idle + iowait))
+    local total=$((user + nice + system + idle_all + irq + softirq + steal))
+    local diff_total=$((total - PREV_CPU_TOTAL))
+    local diff_idle=$((idle_all - PREV_CPU_IDLE))
+    local usage=0
+
+    if ((PREV_CPU_TOTAL > 0 && diff_total > 0)); then
+        usage=$(((100 * (diff_total - diff_idle)) / diff_total))
+    fi
+
+    PREV_CPU_TOTAL=$total
+    PREV_CPU_IDLE=$idle_all
+    printf 'CPU %d%%' "$usage"
+}
+
+read_memory() {
+    local key val _unit total=0 avail=0
+    while IFS=' ' read -r key val _unit; do
+        case "$key" in
+            MemTotal:)
+                total=$val
+                ;;
+            MemAvailable:)
+                avail=$val
+                break
+                ;;
+        esac
+    done < /proc/meminfo
+
+    if ((total > 0)); then
+        local used_pct=$(((100 * (total - avail)) / total))
+        printf 'MEM %d%%' "$used_pct"
+    else
+        printf 'MEM --%%'
+    fi
+}
+
+read_network() {
+    local primary_raw='' conn_path=''
+    primary_raw="$(
+        busctl --system get-property \
+            org.freedesktop.NetworkManager \
+            /org/freedesktop/NetworkManager \
+            org.freedesktop.NetworkManager \
+            PrimaryConnection 2>/dev/null || true
+    )"
+
+    conn_path="${primary_raw#*\"}"
+    conn_path="${conn_path%\"*}"
+
+    if [[ -z "$conn_path" || "$conn_path" == "/" || "$conn_path" == "$primary_raw" ]]; then
+        printf 'NET offline'
+        return
+    fi
+
+    local id_line='' type_line='' id='' type=''
+    {
+        IFS= read -r id_line
+        IFS= read -r type_line
+    } < <(
+        busctl --system --verbose get-property \
+            org.freedesktop.NetworkManager \
+            "$conn_path" \
+            org.freedesktop.NetworkManager.Connection.Active \
+            Id Type 2>/dev/null || true
+    )
+
+    if [[ "$id_line" == 'STRING "'*'";' ]]; then
+        id="${id_line#STRING \"}"
+        id="${id%\";}"
+        id="${id//\\\"/\"}"
+        id="${id//\\\\/\\}"
+    fi
+    if [[ "$type_line" == 'STRING "'*'";' ]]; then
+        type="${type_line#STRING \"}"
+        type="${type%\";}"
+    fi
+
+    case "$type" in
+        802-11-wireless)
+            printf 'Wi-Fi %s' "${id:-connected}"
+            ;;
+        802-3-ethernet)
+            printf 'ETH %s' "${id:-connected}"
+            ;;
+        *)
+            if [[ -n "$id" ]]; then
+                printf 'NET %s' "$id"
+            else
+                printf 'NET online'
+            fi
+            ;;
+    esac
+}
+
+read_volume() {
+    local out=''
+    out="$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null || true)"
+    if [[ -z "$out" ]]; then
+        printf 'VOL --'
+        return
+    fi
+
+    # Example: "Volume: 1.00 [MUTED]" or "Volume: 0.45"
+    local raw_vol='' pct=0
+    raw_vol="$(awk '{printf "%d", ($2 * 100) + 0.5}' <<< "$out" 2>/dev/null || printf '0')"
+    pct="${raw_vol:-0}"
+
+    if [[ "$out" == *"[MUTED]"* ]]; then
+        printf 'VOL %d%% (MUTE)' "$pct"
+    else
+        printf 'VOL %d%%' "$pct"
+    fi
+}
+
+read_brightness() {
+    local bl_dir='' cur=0 max=0
+    for bl_dir in /sys/class/backlight/*; do
+        [[ -d "$bl_dir" ]] || continue
+        if [[ -r "$bl_dir/brightness" && -r "$bl_dir/max_brightness" ]]; then
+            IFS= read -r cur < "$bl_dir/brightness" || cur=0
+            IFS= read -r max < "$bl_dir/max_brightness" || max=0
+            if ((max > 0)); then
+                local pct=$(((100 * cur + max / 2) / max))
+                printf 'BRI %d%%' "$pct"
+                return
+            fi
+        fi
+    done
+    printf 'BRI --%%'
+}
+
+read_power_profile() {
+    local raw='' profile=''
+    raw="$(
+        busctl --system get-property \
+            org.freedesktop.UPower.PowerProfiles \
+            /org/freedesktop/UPower/PowerProfiles \
+            org.freedesktop.UPower.PowerProfiles \
+            ActiveProfile 2>/dev/null || true
+    )"
+    profile="${raw#*\"}"
+    profile="${profile%\"*}"
+
+    if [[ -n "$profile" && "$profile" != "$raw" ]]; then
+        printf 'PWR %s' "$profile"
+    else
+        printf 'PWR --'
+    fi
+}
+
+read_battery() {
+    local bat_dir='/sys/class/power_supply/BAT0'
+    if [[ ! -d "$bat_dir" ]]; then
+        for bat_dir in /sys/class/power_supply/BAT*; do
+            [[ -d "$bat_dir" ]] && break
+        done
+    fi
+
+    if [[ ! -d "$bat_dir" ]]; then
+        printf 'BAT --'
+        return
+    fi
+
+    local cap='--' status='Unknown' tag=''
+    [[ -r "$bat_dir/capacity" ]] && IFS= read -r cap < "$bat_dir/capacity"
+    [[ -r "$bat_dir/status" ]] && IFS= read -r status < "$bat_dir/status"
+
+    case "$status" in
+        Charging)
+            tag='CHG'
+            ;;
+        Discharging)
+            tag='DIS'
+            ;;
+        Full)
+            tag='FULL'
+            ;;
+        'Not charging')
+            tag='AC'
+            ;;
+        *)
+            tag="$status"
+            ;;
+    esac
+
+    printf 'BAT %s%% (%s)' "$cap" "$tag"
+}
+
+print_status_line() {
+    local net cpu mem vol bri pwr bat now
+    net="$(read_network)"
+    cpu="$(read_cpu)"
+    mem="$(read_memory)"
+    vol="$(read_volume)"
+    bri="$(read_brightness)"
+    pwr="$(read_power_profile)"
+    bat="$(read_battery)"
+    printf -v now '%(%Y-%m-%d %H:%M:%S)T' -1
+
+    printf '%s | %s %s | %s | %s | %s | %s | %s\n' \
+        "$net" "$cpu" "$mem" "$vol" "$bri" "$pwr" "$bat" "$now"
+}
+
+# Seed CPU counters so the first visible line has a real delta.
+read_cpu >/dev/null
+
+if [[ "${1:-}" == "--once" ]]; then
+    sleep 0.1
+    print_status_line
+    exit 0
+fi
+
+while true; do
+    print_status_line
+    sleep 2
+done
