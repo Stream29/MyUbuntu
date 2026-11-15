@@ -1,0 +1,22 @@
+#!/bin/sh
+# Dedicated fstab helper for AnyStorage's GNOME volume.
+# Actual mounting remains owned by the user's ossfs2 systemd service.
+set -eu
+
+if [ "${1:-}" != anystorage ] || [ "${2:-}" != /media/stream/AnyStorage ]; then
+    echo 'AnyStorage: unexpected mount source or target' >&2
+    exit 2
+fi
+
+case "$(id -u)" in
+    1000)
+        exec env ANYSTORAGE_NO_DIALOG=1 /home/stream/ACodeSpace/push/DeviceManagement/bin/anystorage-control mount --no-open
+        ;;
+    0)
+        exec /usr/sbin/runuser -u stream -- env ANYSTORAGE_NO_DIALOG=1 /home/stream/ACodeSpace/push/DeviceManagement/bin/anystorage-control mount --no-open
+        ;;
+    *)
+        echo 'AnyStorage: this mount can only be started by stream' >&2
+        exit 1
+        ;;
+esac

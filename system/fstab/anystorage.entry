@@ -1,0 +1,3 @@
+# Reference fragment for /etc/fstab; this file is not automatically included.
+# Expose AnyStorage as a GNOME volume and mount it only on user request.
+anystorage /media/stream/AnyStorage anystorage-ossfs2 noauto,user,nofail,_netdev,x-gvfs-show,x-gvfs-name=AnyStorage 0 0
