@@ -8,13 +8,13 @@
 - Rime 用户目录：`~/.local/share/fcitx5/rime`（包含雾凇拼音配置、用户词库与 `sync/`）
 - Sway / Qt6 / SDL3 相关集成：
   - [`../bin/sway-fcitx`](../bin/sway-fcitx)
-  - [`../systemd/environment.d/90-fcitx.conf`](../systemd/environment.d/90-fcitx.conf)
-  - [`../sway/common.conf`](../sway/common.conf)
+  - [`../home/.config/environment.d/90-fcitx.conf`](../home/.config/environment.d/90-fcitx.conf)
+  - [`../home/.config/sway/common.conf`](../home/.config/sway/common.conf)
 
 ## Rime OSS 用户数据同步
 
 - 同步脚本：[`../bin/rime-oss-sync`](../bin/rime-oss-sync)
-- 用户服务与定时器：[`../systemd/user/rime-oss-sync.service`](../systemd/user/rime-oss-sync.service)、[`../systemd/user/rime-oss-sync.timer`](../systemd/user/rime-oss-sync.timer)
+- 用户服务与定时器：[`../home/.config/systemd/user/rime-oss-sync.service`](../home/.config/systemd/user/rime-oss-sync.service)、[`../home/.config/systemd/user/rime-oss-sync.timer`](../home/.config/systemd/user/rime-oss-sync.timer)
 - 流程：
   1. 使用 `ossutil` 从 `oss://rime-data/` 拉取同步目录到本地状态目录。
   2. 将其他设备 `installation_id` 的目录复制到 Rime `sync/`。
@@ -26,5 +26,5 @@
 
 - 由 `fcitx5-vinput` 插件与 `vinput-daemon.service` 组成，通过 PipeWire 采集 16 kHz 单声道 PCM 发送至阿里云百炼 `qwen3-asr-flash-realtime`。
 - 触发键：键盘 Copilot 键（Fn Lock 下发送 `Shift+Super+XF86Assistant`）。
-- 用户服务覆写：[`../systemd/user/vinput-daemon.service.d/override.conf`](../systemd/user/vinput-daemon.service.d/override.conf)（`VINPUT_CAPTURE_IDLE_DESTROY_MS=60000`）。
+- 用户服务覆写：[`../home/.config/systemd/user/vinput-daemon.service.d/override.conf`](../home/.config/systemd/user/vinput-daemon.service.d/override.conf)（`VINPUT_CAPTURE_IDLE_DESTROY_MS=60000`）。
 - 凭据位置：`~/.config/vinput/config.json`（保留在本地，不入库）。
