@@ -1,0 +1,165 @@
+{
+  "gnome_shell_target": "50.1",
+  "ubuntu_session_mode_file": "/usr/share/gnome-shell/modes/ubuntu.json",
+  "stale_dconf_enabled_extensions": [
+    "pano@elhan.io"
+  ],
+  "extensions": [
+    {
+      "uuid": "caffeine@patapon.info",
+      "name": "Caffeine",
+      "scope": "user",
+      "enabled": true,
+      "session_mode": false,
+      "version": 61,
+      "shell_version": ["45", "46", "47", "48", "49", "50", "51"],
+      "url": "https://github.com/eonpatapon/gnome-shell-extension-caffeine",
+      "settings_schema": "org.gnome.shell.extensions.caffeine",
+      "notes": "Paired with user service caffeine-lock-sync.service; enable-fullscreen=false."
+    },
+    {
+      "uuid": "clipboard-indicator@tudmotu.com",
+      "name": "Clipboard Indicator",
+      "scope": "user",
+      "enabled": true,
+      "session_mode": false,
+      "version": 72,
+      "shell_version": ["47", "48", "49", "50", "51"],
+      "url": "https://github.com/Tudmotu/gnome-shell-extension-clipboard-indicator",
+      "settings_schema": "org.gnome.shell.extensions.clipboard-indicator",
+      "notes": "Toggle menu bound to <Super>v."
+    },
+    {
+      "uuid": "hibernate-power-menu@arnakazim",
+      "name": "Hibernate Power Menu",
+      "scope": "user",
+      "enabled": true,
+      "session_mode": false,
+      "version": 6,
+      "shell_version": ["48", "49", "50", "51"],
+      "url": "https://git.sr.ht/~arnakazim/gnome-hibernate-power-menu",
+      "settings_schema": "org.gnome.shell.extensions.hibernate-power-menu",
+      "notes": "Adds Hibernate/Hybrid Sleep to GNOME Quick Settings power menu alongside system/etc/polkit-1/rules.d/60-device-management-hibernate.rules."
+    },
+    {
+      "uuid": "kimpanel@kde.org",
+      "name": "Input Method Panel",
+      "scope": "user",
+      "enabled": true,
+      "session_mode": false,
+      "version": 92,
+      "shell_version": ["48", "49", "50"],
+      "url": "https://github.com/wengxt/gnome-shell-extension-kimpanel",
+      "settings_schema": "org.gnome.shell.extensions.kimpanel",
+      "notes": "Renders Fcitx5 candidate popup on GNOME Wayland; sway-fcitx disables Fcitx5 kimpanel when Sway VT is active."
+    },
+    {
+      "uuid": "pin-window@eltaweel068",
+      "name": "Pin Window",
+      "scope": "user",
+      "enabled": true,
+      "session_mode": false,
+      "version": 1,
+      "shell_version": ["45", "46", "47", "48", "49", "50"],
+      "url": "https://github.com/eltaweel068/pin-window",
+      "settings_schema": "org.gnome.shell.extensions.pin-window",
+      "notes": "Toggle pin/always-on-top bound to <Alt>t."
+    },
+    {
+      "uuid": "status-tray@keithvassallo.com",
+      "name": "Status Tray",
+      "scope": "user",
+      "enabled": false,
+      "session_mode": false,
+      "version": "2.0",
+      "shell_version": ["46", "47", "48", "49", "50", "51"],
+      "url": "https://github.com/keithvassallomt/status-tray",
+      "settings_schema": "org.gnome.shell.extensions.status-tray",
+      "notes": "Installed locally but kept disabled in favor of patched ubuntu-appindicators@ubuntu.com."
+    },
+    {
+      "uuid": "ding@rastersoft.com",
+      "name": "Desktop Icons NG (DING)",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": 105,
+      "shell_version": ["50", "51"],
+      "url": "https://gitlab.com/rastersoft/desktop-icons-ng",
+      "settings_schema": "org.gnome.shell.extensions.ding",
+      "notes": "System extension in /usr/share/gnome-shell/extensions/ upgraded to upstream GTK4 v105 to remove synchronous /proc/*/cmdline scanning on display resume."
+    },
+    {
+      "uuid": "snapd-prompting@canonical.com",
+      "name": "SNAPD Permission Prompting",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": null,
+      "shell_version": ["49", "50"],
+      "url": null,
+      "settings_schema": null,
+      "notes": "Ubuntu session-mode system extension."
+    },
+    {
+      "uuid": "snapd-search-provider@canonical.com",
+      "name": "Snapd Search Provider",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": null,
+      "shell_version": ["48", "49", "50"],
+      "url": "https://gitlab.gnome.org/Community/Ubuntu/gnome-shell-snapd-search-provider",
+      "settings_schema": null,
+      "notes": "Ubuntu session-mode system extension."
+    },
+    {
+      "uuid": "tiling-assistant@ubuntu.com",
+      "name": "Ubuntu Tiling Assistant",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": 54,
+      "shell_version": ["48", "49", "50"],
+      "url": "https://launchpad.net/ubuntu/+source/gnome-shell-extension-tiling-assistant",
+      "settings_schema": "org.gnome.shell.extensions.tiling-assistant",
+      "notes": "Ubuntu session-mode tiling extension; automatically calls unmake_fullscreen() before tiling."
+    },
+    {
+      "uuid": "ubuntu-appindicators@ubuntu.com",
+      "name": "Ubuntu AppIndicators",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": null,
+      "shell_version": ["45", "46", "47", "48", "49", "50"],
+      "url": "https://github.com/ubuntu/gnome-shell-extension-appindicator",
+      "settings_schema": "org.gnome.shell.extensions.appindicator",
+      "notes": "System extension carrying local patches from gnome/patches/ubuntu-appindicators.patch (Util.Logger.warn typo fix and optional chaining on this._proxy?.g_name_owner)."
+    },
+    {
+      "uuid": "ubuntu-dock@ubuntu.com",
+      "name": "Ubuntu Dock",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": 105,
+      "shell_version": ["45", "46", "47", "48", "49", "50"],
+      "url": "https://micheleg.github.io/dash-to-dock/",
+      "settings_schema": "org.gnome.shell.extensions.dash-to-dock",
+      "notes": "Uses dash-to-dock schema; autohide-in-fullscreen=false keeps dock hidden and removes edge pressure barrier in fullscreen."
+    },
+    {
+      "uuid": "web-search-provider@ubuntu.com",
+      "name": "Web Search Provider",
+      "scope": "system",
+      "enabled": true,
+      "session_mode": true,
+      "version": null,
+      "shell_version": ["44", "50"],
+      "url": "https://gitlab.gnome.org/Community/Ubuntu/gnome-shell-web-search-provider",
+      "settings_schema": null,
+      "notes": "Ubuntu session-mode system extension."
+    }
+  ]
+}

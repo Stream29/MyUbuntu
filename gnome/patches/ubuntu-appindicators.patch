@@ -1,0 +1,22 @@
+--- a/trayIconsManager.js
++++ b/trayIconsManager.js
+@@ -90,7 +90,7 @@
+             const [trayIcon] = IndicatorStatusIcon.getTrayIcons().filter(i => i.icon === icon);
+             trayIcon.destroy();
+         } catch (e) {
+-            Util.Logger.warning(`No icon container found for ${icon.title} (${icon})`);
++            Util.Logger.warn(`No icon container found for ${icon.title} (${icon})`);
+         }
+     }
+ 
+--- a/appIndicator.js
++++ b/appIndicator.js
+@@ -662,7 +662,7 @@
+     get hasNameOwner() {
+         if (this._nameWatcher && !this._nameWatcher.nameOnBus)
+             return false;
+-        return !!this._proxy.g_name_owner;
++        return !!this._proxy?.g_name_owner;
+     }
+ 
+     get cancellable() {
