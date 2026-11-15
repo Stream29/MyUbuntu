@@ -1,0 +1,7 @@
+[Unit]
+Description=Sync Rime user data with Alibaba OSS
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/rime-oss-sync

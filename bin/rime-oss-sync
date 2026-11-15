@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+ossutil_config="$config_home/rime-oss/ossutil.conf"
+rime_dir="$data_home/fcitx5/rime"
+sync_dir="$rime_dir/sync"
+state_dir="$state_home/rime-oss"
+remote_dir="$state_dir/remote"
+idle_threshold_ms=$((5 * 60 * 1000))
+remote_root="oss://rime-data"
+
+mkdir -p "$sync_dir" "$remote_dir" "$state_dir/ossutil-output" \
+    "$state_dir/checkpoint"
+
+exec 9>"$state_dir/lock"
+flock -n 9 || exit 0
+
+installation_id="$(
+    sed -nE \
+        's/^[[:space:]]*installation_id:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p' \
+        "$rime_dir/installation.yaml"
+)"
+test -n "$installation_id"
+
+ossutil sync "$remote_root/" "$remote_dir/" \
+    --config-file "$ossutil_config" \
+    --output-dir "$state_dir/ossutil-output" \
+    --checkpoint-dir "$state_dir/checkpoint" \
+    --update --force
+
+for peer_dir in "$remote_dir"/*; do
+    test -d "$peer_dir" || continue
+    test "${peer_dir##*/}" = "$installation_id" && continue
+    mkdir -p "$sync_dir/${peer_dir##*/}"
+    cp -a "$peer_dir/." "$sync_dir/${peer_dir##*/}/"
+done
+
+if ! idle_reply="$(
+    gdbus call \
+        --session \
+        --timeout 2 \
+        --dest org.gnome.Mutter.IdleMonitor \
+        --object-path /org/gnome/Mutter/IdleMonitor/Core \
+        --method org.gnome.Mutter.IdleMonitor.GetIdletime \
+        2>/dev/null
+)"; then
+    exit 0
+fi
+idle_ms="$(sed -nE 's/.*uint64 ([0-9]+).*/\1/p' <<<"$idle_reply")"
+[[ "$idle_ms" =~ ^[0-9]+$ ]] || exit 0
+((idle_ms >= idle_threshold_ms)) || exit 0
+
+gdbus call \
+    --session \
+    --dest org.fcitx.Fcitx5 \
+    --object-path /controller \
+    --method org.fcitx.Fcitx.Controller1.SetConfig \
+    "fcitx://config/addon/rime/sync" \
+    "<@a{sv} {}>" >/dev/null
+
+ossutil sync "$sync_dir/$installation_id/" \
+    "$remote_root/$installation_id/" \
+    --config-file "$ossutil_config" \
+    --output-dir "$state_dir/ossutil-output" \
+    --checkpoint-dir "$state_dir/checkpoint" \
+    --update --force

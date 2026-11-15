@@ -10,10 +10,10 @@ fi
 
 case "$(id -u)" in
     1000)
-        exec env ANYSTORAGE_NO_DIALOG=1 /home/stream/ACodeSpace/push/DeviceManagement/bin/anystorage-control mount --no-open
+        exec env ANYSTORAGE_NO_DIALOG=1 /home/stream/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/anystorage-control mount --no-open
         ;;
     0)
-        exec /usr/sbin/runuser -u stream -- env ANYSTORAGE_NO_DIALOG=1 /home/stream/ACodeSpace/push/DeviceManagement/bin/anystorage-control mount --no-open
+        exec /usr/sbin/runuser -u stream -- env ANYSTORAGE_NO_DIALOG=1 /home/stream/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/anystorage-control mount --no-open
         ;;
     *)
         echo 'AnyStorage: this mount can only be started by stream' >&2

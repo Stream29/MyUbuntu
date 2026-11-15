@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AnyStorage
+Comment=挂载并打开 AnyStorage OSS
+Exec=/home/stream/ACodeSpace/push/DeviceManagement/MyUbuntu/bin/anystorage-control mount
+Icon=drive-harddisk
+Terminal=false
+StartupNotify=true
+Categories=Utility;FileTools;
+Keywords=OSS;云存储;网盘;

@@ -1,0 +1,19 @@
+[Unit]
+Description=Mount AnyStorage OSS read-write with ossfs2
+Documentation=https://help.aliyun.com/zh/oss/developer-reference/mount-buckets-using-ossfs-2-0
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+UMask=0077
+ExecStartPre=/usr/bin/mkdir -p /media/stream/AnyStorage
+ExecStartPre=/usr/bin/install -d -m 700 /home/stream/.cache/ossfs2/anystorage-tmp
+ExecStart=/usr/local/bin/ossfs2 mount /media/stream/AnyStorage -c /home/stream/.config/ossfs2/anystorage.conf --f
+ExecStop=-/usr/bin/fusermount3 -u -z /media/stream/AnyStorage
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target

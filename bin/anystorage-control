@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -u
+
+service=anystorage-ossfs2.service
+target=/media/stream/AnyStorage
+expected_source=anystorage.oss-cn-shanghai.aliyuncs.com:/
+
+show_error() {
+    printf 'AnyStorage: %s\n' "$1" >&2
+    if [[ "${ANYSTORAGE_NO_DIALOG:-}" != 1 ]] &&
+        [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] &&
+        command -v zenity >/dev/null; then
+        zenity --error --title='AnyStorage' --text="$1" >/dev/null 2>&1 || true
+    fi
+    exit 1
+}
+
+mounted_source() {
+    findmnt -rn -M "$target" -o SOURCE 2>/dev/null || true
+}
+
+check_source() {
+    local source
+    source=$(mounted_source)
+    if [[ -n "$source" && "$source" != "$expected_source" ]]; then
+        show_error "挂载点 $target 被其他文件系统占用，已停止操作。"
+    fi
+}
+
+case "${1:-}" in
+    mount)
+        check_source
+        if [[ "$(mounted_source)" != "$expected_source" ]]; then
+            # GNOME can unmount the FUSE mount without stopping its systemd
+            # service. Clear that stale active state before starting again.
+            if systemctl --user is-active --quiet "$service"; then
+                systemctl --user stop "$service" ||
+                    show_error '无法清理上次卸载后的服务状态。'
+            fi
+            systemctl --user start "$service" ||
+                show_error '挂载启动失败。请检查网络连接或 AnyStorage 服务状态。'
+            for ((i = 0; i < 120; i++)); do
+                if [[ "$(mounted_source)" == "$expected_source" ]]; then
+                    break
+                fi
+                sleep 0.5
+            done
+            [[ "$(mounted_source)" == "$expected_source" ]] ||
+                show_error '挂载未在一分钟内完成。请检查 AnyStorage 服务日志。'
+        fi
+        if [[ "${2:-}" != '--no-open' ]]; then
+            gio open "$target" || show_error '已挂载，但无法打开文件管理器。'
+        fi
+        ;;
+    unmount)
+        check_source
+        if [[ "$(mounted_source)" == "$expected_source" ]]; then
+            # A file manager may briefly scan the root directory after mounting.
+            # Retry normal unmount; never fall back to lazy or forced unmount.
+            for ((i = 0; i < 10; i++)); do
+                if fusermount3 -u "$target" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+            [[ -z "$(mounted_source)" ]] ||
+                show_error '无法安全卸载：可能有文件正在使用。未强制卸载，请先关闭相关文件或窗口后重试。'
+        fi
+        systemctl --user stop "$service" ||
+            show_error '挂载已卸载，但停止服务失败。'
+        [[ -z "$(mounted_source)" ]] ||
+            show_error '服务停止后挂载仍然存在，请检查状态。'
+        ;;
+    *)
+        printf 'Usage: %s mount [--no-open] | unmount\n' "$0" >&2
+        exit 2
+        ;;
+esac

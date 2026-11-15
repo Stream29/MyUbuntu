@@ -1,0 +1,297 @@
+#!/usr/bin/python3
+"""Small English CLI for the external AnyStorage VFS only."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+DISK = Path("/run/media/stream/Stream")
+ENTRY = DISK / "AnyStorage"
+CACHE_ROOT = DISK / ".rclone-cache"
+CACHE = CACHE_ROOT / "vfs"
+UUID = "9f37332f-e560-4882-be50-1d1c28663488"
+MOUNT_UNIT = "anystorage-external-rclone.service"
+REMOTE_SUFFIX = ":anystorage"
+TITLE = "AnyStorage VFS"
+
+
+class ControlError(Exception):
+    pass
+
+
+def run(args, timeout=120):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def mounts():
+    result = run([
+        "findmnt", "--json", "--list",
+        "--output", "TARGET,SOURCE,FSTYPE,UUID,OPTIONS",
+    ])
+    if result.returncode:
+        raise ControlError("cannot read mount table")
+    return {item["target"]: item for item in json.loads(result.stdout)["filesystems"]}
+
+
+def service_info():
+    result = run([
+        "systemctl", "--no-pager", "show", MOUNT_UNIT,
+        "--property=ActiveState,SubState,MainPID,ExecMainStatus",
+    ])
+    if result.returncode:
+        return {
+            "active": "unknown",
+            "sub": "unknown",
+            "pid": "0",
+            "exit": "unknown",
+        }
+    info = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info[key] = value
+    return {
+        "active": info.get("ActiveState", "unknown"),
+        "sub": info.get("SubState", "unknown"),
+        "pid": info.get("MainPID", "0"),
+        "exit": info.get("ExecMainStatus", "unknown"),
+    }
+
+
+def authorize(verb):
+    if verb not in {"start", "stop"}:
+        raise ControlError("unsupported service operation")
+    result = subprocess.run(
+        ["pkexec", "/usr/bin/systemctl", "--no-pager", verb, MOUNT_UNIT],
+        timeout=120,
+    )
+    if result.returncode:
+        raise ControlError("authorization cancelled or VFS service failed")
+
+
+def disk_info(table):
+    return table.get(str(DISK))
+
+
+def disk_is_ready(table):
+    volume = disk_info(table)
+    return bool(
+        volume
+        and volume.get("uuid") == UUID
+        and volume.get("fstype") == "ext4"
+        and not DISK.is_symlink()
+    )
+
+
+def vfs_info(table):
+    volume = table.get(str(ENTRY))
+    if not volume:
+        return None
+    source = volume.get("source", "")
+    if volume.get("fstype") != "fuse.rclone" or not source.endswith(REMOTE_SUFFIX):
+        raise ControlError("VFS path is occupied by another filesystem")
+    return volume
+
+
+def ensure_cache_paths(table):
+    if not disk_is_ready(table):
+        raise ControlError("Stream disk is not mounted at the expected path")
+    for path in (CACHE_ROOT, CACHE, ENTRY):
+        if path.is_symlink():
+            raise ControlError(f"refusing symlinked path: {path}")
+    if CACHE_ROOT.exists() and CACHE_ROOT.stat().st_dev != DISK.stat().st_dev:
+        raise ControlError("cache is not on the Stream disk")
+    CACHE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    CACHE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ENTRY.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if CACHE_ROOT.stat().st_dev != DISK.stat().st_dev:
+        raise ControlError("cache is not on the Stream disk")
+    if any(
+        target == str(CACHE_ROOT) or target.startswith(str(CACHE_ROOT) + "/")
+        for target in table
+    ):
+        raise ControlError("another mount exists below the cache directory")
+    if any(ENTRY.iterdir()):
+        raise ControlError("VFS mountpoint is not empty")
+
+
+def mount_vfs():
+    table = mounts()
+    if vfs_info(table):
+        return
+    if str(ENTRY) in table:
+        raise ControlError("VFS mountpoint is occupied by another filesystem")
+    info = service_info()
+    if info["active"] in {"active", "activating", "deactivating"}:
+        raise ControlError("service and VFS mount state are inconsistent")
+    ensure_cache_paths(table)
+    authorize("start")
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        current = mounts()
+        if vfs_info(current):
+            return
+        time.sleep(0.25)
+    raise ControlError("VFS service started but mountpoint did not appear")
+
+
+def fuser_has_process(path):
+    result = run(["fuser", "-m", "-v", str(path)])
+    text = (result.stdout or "") + (result.stderr or "")
+    return any(
+        "kernel mount" not in line
+        and "PID" not in line
+        and re.search(r"\b\d+\b", line)
+        for line in text.splitlines()
+    )
+
+
+def unmount_vfs():
+    table = mounts()
+    mounted = vfs_info(table)
+    info = service_info()
+    if not mounted:
+        if info["active"] in {"active", "activating", "deactivating"}:
+            raise ControlError("service is active but VFS is not mounted")
+        return
+    if fuser_has_process(ENTRY):
+        raise ControlError("VFS is busy; close files and applications first")
+    authorize("stop")
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        current = mounts()
+        if str(ENTRY) not in current:
+            return
+        time.sleep(0.25)
+    raise ControlError("VFS did not unmount cleanly")
+
+
+def format_bytes(value):
+    value = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(value) < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+
+
+def status_text():
+    table = mounts()
+    disk = disk_info(table)
+    foreign = None
+    try:
+        vfs = vfs_info(table)
+    except ControlError:
+        vfs = None
+        foreign = table.get(str(ENTRY))
+    service = service_info()
+    lines = [TITLE, "=" * len(TITLE)]
+    if disk:
+        disk_state = f"mounted {disk.get('source', '?')} {disk.get('fstype', '?')}"
+        if disk_is_ready(table):
+            usage = shutil.disk_usage(DISK)
+            disk_state += (
+                f", free {format_bytes(usage.free)} / {format_bytes(usage.total)}"
+            )
+    else:
+        disk_state = "not mounted at expected path"
+    lines.append(f"Disk:       {disk_state}")
+    if vfs:
+        options = vfs.get("options", "")
+        mode = "rw" if "rw" in options.split(",") else "ro"
+        lines.append(f"VFS:        mounted ({mode})")
+    elif foreign:
+        volume = table[str(ENTRY)]
+        lines.append(
+            f"VFS:        foreign mount ({volume.get('fstype', '?')}, "
+            f"{volume.get('source', '?')})"
+        )
+    else:
+        lines.append("VFS:        not mounted")
+    lines += [
+        f"Service:    {service['active']}/{service['sub']} "
+        f"pid={service['pid']} exit={service['exit']}",
+        f"Remote:     anystorage:anystorage",
+        f"Mountpoint: {ENTRY}",
+        f"Cache:      {CACHE} (full, persistent, limit 300 GiB)",
+        "Policy:     on-demand; no automatic full-bucket prewarm",
+    ]
+    return "\n".join(lines)
+
+
+def menu():
+    actions = {
+        "1": ("Mount VFS", mount_vfs),
+        "2": ("Show status", lambda: print(status_text())),
+        "3": ("Unmount VFS", unmount_vfs),
+    }
+    while True:
+        print("\033[2J\033[H", end="")
+        print(status_text())
+        print("\n[1] Mount VFS\n[2] Show status\n[3] Unmount VFS\n[0] Exit")
+        try:
+            choice = input("\nSelect: ").strip()
+        except EOFError:
+            return
+        if choice == "0":
+            return
+        action = actions.get(choice)
+        if not action:
+            print("Invalid selection.")
+        else:
+            try:
+                action[1]()
+                print("Done.")
+            except (ControlError, OSError, subprocess.SubprocessError, ValueError) as error:
+                print(f"Error: {error}")
+        try:
+            input("\nPress Enter to continue...")
+        except EOFError:
+            return
+
+
+def main():
+    parser = argparse.ArgumentParser(description=TITLE)
+    parser.add_argument(
+        "action", nargs="?", default="menu",
+        choices=["menu", "mount", "status", "unmount"],
+    )
+    args = parser.parse_args()
+    if os.geteuid() == 0:
+        raise ControlError("run anystoragectl as a normal user, not with sudo")
+    if args.action == "status":
+        print(status_text())
+        return
+    if args.action == "menu" and not sys.stdin.isatty():
+        terminal = shutil.which("xdg-terminal-exec")
+        if not terminal:
+            raise ControlError("xdg-terminal-exec is not available")
+        os.execv(terminal, [
+            terminal, "--title=AnyStorage VFS", "--",
+            sys.executable, str(Path(__file__).resolve()),
+        ])
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    with (runtime / "anystorage-vfsctl.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ControlError("another anystoragectl instance is running")
+        if args.action == "menu":
+            menu()
+        elif args.action == "mount":
+            mount_vfs()
+        elif args.action == "unmount":
+            unmount_vfs()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ControlError, OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
