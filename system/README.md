@@ -41,3 +41,15 @@ child processes do not inherit it, and intercepts `sd_session_get_type` inside
 `gdm3` so non-GDM sessions (`SERVICE != gdm*`, such as TTY-launched Sway with
 `SERVICE=login`) report `type="tty"` and do not shadow GDM's own display session
 during `OpenReauthenticationChannel`.
+
+`etc/tmpfiles.d/60-device-management-hibernate.conf` mirrors
+`/etc/tmpfiles.d/60-device-management-hibernate.conf`, raising
+`/sys/power/image_size` (`16 GiB`, clamped by the kernel to its physical
+snapshot ceiling) and `/sys/power/hibernate_compression_threads` (`6`).
+
+`usr/lib/systemd/system-sleep/60-device-management-hibernate` mirrors
+`/usr/lib/systemd/system-sleep/60-device-management-hibernate` (`root:root`,
+mode `0755`), temporarily lowering `vm.swappiness` to `1` and lifting
+`power-saver` to `performance` (`balanced` fallback) during `hibernate` and
+`hybrid-sleep` phases, then restoring state on `post` (respecting AC transitions
+across hibernation).

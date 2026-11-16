@@ -1,0 +1,165 @@
+#!/bin/sh
+# Temporarily bias kernel memory reclaim toward clean page cache and lift
+# power-saver throttling during hibernation so snapshot allocation and LZO
+# compression avoid thrashing through zstd zram at low CPU clocks.
+set -u
+
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
+SWAPPINESS_PATH="${HIBERNATE_HOOK_SWAPPINESS_PATH:-/proc/sys/vm/swappiness}"
+POWER_SUPPLY_DIR="${HIBERNATE_HOOK_POWER_SUPPLY_DIR:-/sys/class/power_supply}"
+STATE_DIR="${HIBERNATE_HOOK_STATE_DIR:-/run/device-management-hibernate}"
+STATE_FILE="$STATE_DIR/state"
+POWERPROFILESCTL="${HIBERNATE_HOOK_POWERPROFILESCTL:-powerprofilesctl}"
+TIMEOUT_BIN="${HIBERNATE_HOOK_TIMEOUT_BIN:-timeout}"
+TARGET_SWAPPINESS="${HIBERNATE_HOOK_TARGET_SWAPPINESS:-1}"
+
+PHASE="${1:-}"
+SLEEP_TYPE="${2:-}"
+EFFECTIVE_ACTION="${SYSTEMD_SLEEP_ACTION:-$SLEEP_TYPE}"
+
+is_uint() {
+    [ -n "$1" ] || return 1
+    case "$1" in
+        *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+is_valid_profile() {
+    case "$1" in
+        performance|balanced|power-saver) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+read_ac_online() {
+    found_mains=0
+    for ps in "$POWER_SUPPLY_DIR"/*; do
+        [ -d "$ps" ] || continue
+        [ -r "$ps/type" ] && [ -r "$ps/online" ] || continue
+        ps_type="$(cat "$ps/type" 2>/dev/null || true)"
+        [ "$ps_type" = "Mains" ] || continue
+        found_mains=1
+        ps_online="$(cat "$ps/online" 2>/dev/null || true)"
+        if [ "$ps_online" = "1" ]; then
+            printf '1\n'
+            return 0
+        fi
+    done
+    if [ "$found_mains" = "1" ]; then
+        printf '0\n'
+    fi
+}
+
+read_swappiness() {
+    val="$(cat "$SWAPPINESS_PATH" 2>/dev/null || true)"
+    if is_uint "$val"; then
+        printf '%s\n' "$val"
+    fi
+}
+
+write_swappiness() {
+    is_uint "$1" || return 0
+    [ -w "$SWAPPINESS_PATH" ] || return 0
+    printf '%s\n' "$1" > "$SWAPPINESS_PATH" 2>/dev/null || true
+}
+
+read_profile() {
+    val="$("$TIMEOUT_BIN" 2 "$POWERPROFILESCTL" get 2>/dev/null || true)"
+    if is_valid_profile "$val"; then
+        printf '%s\n' "$val"
+    fi
+}
+
+set_profile() {
+    is_valid_profile "$1" || return 0
+    "$TIMEOUT_BIN" 2 "$POWERPROFILESCTL" set "$1" 2>/dev/null
+}
+
+handle_pre() {
+    case "$EFFECTIVE_ACTION" in
+        hibernate|hybrid-sleep) ;;
+        *) return 0 ;;
+    esac
+
+    saved_swappiness="$(read_swappiness)"
+    saved_profile="$(read_profile)"
+    saved_ac_online="$(read_ac_online)"
+
+    if (
+        umask 077
+        mkdir -p "$STATE_DIR" 2>/dev/null || exit 1
+        chmod 0700 "$STATE_DIR" 2>/dev/null || exit 1
+        tmp_file="$STATE_FILE.tmp.$$"
+        {
+            printf 'SAVED_SWAPPINESS=%s\n' "$saved_swappiness"
+            printf 'SAVED_PROFILE=%s\n' "$saved_profile"
+            printf 'SAVED_AC_ONLINE=%s\n' "$saved_ac_online"
+        } > "$tmp_file" && mv -f "$tmp_file" "$STATE_FILE"
+    ); then
+        :
+    fi
+
+    if [ -n "$saved_swappiness" ] && [ "$saved_swappiness" != "$TARGET_SWAPPINESS" ]; then
+        write_swappiness "$TARGET_SWAPPINESS"
+    fi
+
+    if [ -n "$saved_profile" ] && [ "$saved_profile" != "performance" ]; then
+        set_profile performance || set_profile balanced || true
+    fi
+}
+
+handle_post() {
+    [ -f "$STATE_FILE" ] || return 0
+
+    saved_swappiness=""
+    saved_profile=""
+    saved_ac_online=""
+
+    while IFS='=' read -r key val; do
+        case "$key" in
+            SAVED_SWAPPINESS)
+                is_uint "$val" && saved_swappiness="$val"
+                ;;
+            SAVED_PROFILE)
+                is_valid_profile "$val" && saved_profile="$val"
+                ;;
+            SAVED_AC_ONLINE)
+                case "$val" in
+                    0|1) saved_ac_online="$val" ;;
+                esac
+                ;;
+        esac
+    done < "$STATE_FILE"
+
+    rm -f "$STATE_FILE"
+    rmdir "$STATE_DIR" 2>/dev/null || true
+
+    if [ -n "$saved_swappiness" ]; then
+        write_swappiness "$saved_swappiness"
+    else
+        write_swappiness 100
+    fi
+
+    if [ -n "$saved_profile" ]; then
+        current_ac_online="$(read_ac_online)"
+        if [ -n "$saved_ac_online" ] && [ -n "$current_ac_online" ] && [ "$saved_ac_online" != "$current_ac_online" ]; then
+            if [ "$current_ac_online" = "1" ]; then
+                set_profile performance || set_profile balanced || true
+            else
+                set_profile power-saver || true
+            fi
+        else
+            set_profile "$saved_profile" || true
+        fi
+    fi
+}
+
+case "$PHASE" in
+    pre) handle_pre ;;
+    post) handle_post ;;
+esac
+
+exit 0
