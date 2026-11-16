@@ -15,6 +15,7 @@ GNOME_DIR = REPO_ROOT / "gnome"
 DCONF_INI = GNOME_DIR / "dconf-settings.ini"
 EXTENSIONS_JSON = GNOME_DIR / "extensions.json"
 APPINDICATORS_PATCH = GNOME_DIR / "patches" / "ubuntu-appindicators.patch"
+DING_PATCH = GNOME_DIR / "patches" / "ding.patch"
 
 FORBIDDEN_DCONF_SECTIONS = (
     "org/gnome/nm-applet",
@@ -114,3 +115,13 @@ class GnomeConfigTests(unittest.TestCase):
         self.assertIn("--- a/appIndicator.js", patch_text)
         self.assertIn("+++ b/appIndicator.js", patch_text)
         self.assertIn("+        return !!this._proxy?.g_name_owner;", patch_text)
+
+    def test_ding_patch_is_well_formed(self) -> None:
+        patch_text = DING_PATCH.read_text(encoding="utf-8")
+        self.assertIn("--- a/extension.js", patch_text)
+        self.assertIn("+++ b/extension.js", patch_text)
+        self.assertIn("+    beginShutdown() {", patch_text)
+        self.assertIn("+        if (!this.data.isEnabled || this.data.isShuttingDown)", patch_text)
+        self.assertIn("+        if (this.data.isEnabled && !this.data.isShuttingDown) {", patch_text)
+        self.assertIn("+                'SessionOver',", patch_text)
+        self.assertIn("+            else if (obj.get_if_signaled() && reloadTime < 500)", patch_text)

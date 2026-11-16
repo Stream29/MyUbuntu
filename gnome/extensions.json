@@ -87,7 +87,7 @@
       "shell_version": ["50", "51"],
       "url": "https://gitlab.com/rastersoft/desktop-icons-ng",
       "settings_schema": "org.gnome.shell.extensions.ding",
-      "notes": "System extension in /usr/share/gnome-shell/extensions/ upgraded to upstream GTK4 v105 to remove synchronous /proc/*/cmdline scanning on display resume."
+      "notes": "System extension in /usr/share/gnome-shell/extensions/ upgraded to upstream GTK4 v105 to remove synchronous /proc/*/cmdline scanning on display resume, carrying local patch gnome/patches/ding.patch to suppress 1ms relaunches during GNOME session shutdown so xdg-desktop-portal/DBus cannot wedge across logout."
     },
     {
       "uuid": "snapd-prompting@canonical.com",

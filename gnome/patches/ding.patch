@@ -1,0 +1,147 @@
+--- a/extension.js
++++ b/extension.js
+@@ -35,8 +35,13 @@
+         this.DesktopIconsUsableArea = null;
+         this.data = {};
+         this.data.isEnabled = false;
++        this.data.isShuttingDown = false;
++        this.data.sawSessionManager = false;
+         this.data.launchDesktopId = 0;
+         this.data.currentProcess = null;
++        this.data.shutdownId = 0;
++        this.data.sessionWatchId = 0;
++        this.data.sessionOverId = 0;
+ 
+         /* The constructor of the EmulateX11 class only initializes some
+         * internal properties, but nothing else. In fact, it has its own
+@@ -68,7 +73,10 @@
+     disable() {
+         this.DesktopIconsUsableArea = null;
+         this.data.isEnabled = false;
++        this._disconnectShutdownWatchers();
+         this.killCurrentProcess();
++        this.data.isShuttingDown = false;
++        this.data.sawSessionManager = false;
+         this.data.x11Manager.disable();
+         this.data.visibleArea.disable();
+ 
+@@ -157,6 +165,9 @@
+             () => this.updateDesktopGeometry());
+ 
+         this.data.isEnabled = true;
++        this.data.isShuttingDown = false;
++        this.data.sawSessionManager = false;
++        this._connectShutdownWatchers();
+         if (this.data.launchDesktopId) {
+             GLib.source_remove(this.data.launchDesktopId);
+             this.data.launchDesktopId = 0;
+@@ -186,6 +197,61 @@
+         }, null);
+     }
+ 
++    _connectShutdownWatchers() {
++        if (!this.data.shutdownId)
++            this.data.shutdownId = global.connect('shutdown', () => this.beginShutdown());
++
++        if (!this.data.sessionOverId) {
++            this.data.sessionOverId = Gio.DBus.session.signal_subscribe(
++                'org.gnome.SessionManager',
++                'org.gnome.SessionManager',
++                'SessionOver',
++                '/org/gnome/SessionManager',
++                null,
++                Gio.DBusSignalFlags.NONE,
++                () => this.beginShutdown()
++            );
++        }
++
++        if (!this.data.sessionWatchId) {
++            this.data.sessionWatchId = Gio.bus_watch_name(
++                Gio.BusType.SESSION,
++                'org.gnome.SessionManager',
++                Gio.BusNameWatcherFlags.NONE,
++                () => {
++                    this.data.sawSessionManager = true;
++                },
++                () => {
++                    if (this.data.sawSessionManager)
++                        this.beginShutdown();
++                }
++            );
++        }
++    }
++
++    _disconnectShutdownWatchers() {
++        if (this.data.shutdownId) {
++            global.disconnect(this.data.shutdownId);
++            this.data.shutdownId = 0;
++        }
++        if (this.data.sessionWatchId) {
++            Gio.bus_unwatch_name(this.data.sessionWatchId);
++            this.data.sessionWatchId = 0;
++        }
++        if (this.data.sessionOverId) {
++            Gio.DBus.session.signal_unsubscribe(this.data.sessionOverId);
++            this.data.sessionOverId = 0;
++        }
++    }
++
++    beginShutdown() {
++        if (this.data.isShuttingDown)
++            return;
++
++        this.data.isShuttingDown = true;
++        this.killCurrentProcess();
++    }
++
+     /**
+      * Kills the current desktop program
+      */
+@@ -265,7 +331,7 @@
+             GLib.source_remove(this.data.launchDesktopId);
+             this.data.launchDesktopId = 0;
+         }
+-        if (this.data.isEnabled) {
++        if (this.data.isEnabled && !this.data.isShuttingDown) {
+             this.data.launchDesktopId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, reloadTime, () => {
+                 this.data.launchDesktopId = 0;
+                 this.launchDesktop();
+@@ -281,6 +347,9 @@
+      * debug it.
+      */
+     launchDesktop() {
++        if (!this.data.isEnabled || this.data.isShuttingDown)
++            return;
++
+         console.log('Launching DING process');
+         const argv = [];
+         argv.push(GLib.build_filenamev([this.path, 'app', 'ding.js']));
+@@ -306,18 +375,23 @@
+         */
+         this.data.currentProcess.subprocess.wait_async(null, (obj, res) => {
+             const delta = GLib.get_monotonic_time() - this.data.launchTime;
++            obj.wait_finish(res);
++            if (!this.data.currentProcess || obj !== this.data.currentProcess.subprocess)
++                return;
++
++            if (this.data.isShuttingDown || !this.data.isEnabled)
++                return;
++
+             // if the process just died after having run for at least one second, reload it ASAP
+-            var reloadTime = 1;
++            let reloadTime = 1;
+             if (delta < 1000000) {
+                 // but if the process is dying over and over again, ensure that it isn't respawn faster than once per second
+                 reloadTime = 1000;
+             }
+-            obj.wait_finish(res);
+-            if (!this.data.currentProcess || obj !== this.data.currentProcess.subprocess)
+-                return;
+-
+             if (obj.get_if_exited())
+                 obj.get_exit_status();
++            else if (obj.get_if_signaled() && reloadTime < 500)
++                reloadTime = 500;
+ 
+             this.doRelaunch(reloadTime);
+         });
