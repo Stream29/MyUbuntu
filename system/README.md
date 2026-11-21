@@ -53,3 +53,10 @@ mode `0755`), temporarily lowering `vm.swappiness` to `1` and lifting
 `power-saver` to `performance` (`balanced` fallback) during `hibernate` and
 `hybrid-sleep` phases, then restoring state on `post` (respecting AC transitions
 across hibernation).
+
+`etc/systemd/system/fprintd.service.d/50-local-libfprint.conf` mirrors
+`/etc/systemd/system/fprintd.service.d/50-local-libfprint.conf` (`root:root`,
+mode `0644`), pointing `fprintd.service` at the root-owned
+`/usr/local/lib/libfprint-goodixmoc/libfprint-2.so.2.0.0` (`libfprint-2.so.2`
+symlink, built from `MyUbuntu/libfprint` with `-Ddrivers=goodixmoc`) without
+overwriting apt-managed `/usr/lib/x86_64-linux-gnu/libfprint-2.so.2`.
