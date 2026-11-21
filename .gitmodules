@@ -1,3 +1,6 @@
 [submodule "fcitx5-llm-completion"]
 	path = fcitx5-llm-completion
 	url = git@github.com:Stream29/fcitx5-llm-completion.git
+[submodule "libfprint"]
+	path = libfprint
+	url = git@github.com:Stream29/libfprint.git
