@@ -16,6 +16,15 @@ DCONF_INI = GNOME_DIR / "dconf-settings.ini"
 EXTENSIONS_JSON = GNOME_DIR / "extensions.json"
 APPINDICATORS_PATCH = GNOME_DIR / "patches" / "ubuntu-appindicators.patch"
 DING_PATCH = GNOME_DIR / "patches" / "ding.patch"
+CLIPBOARD_INDICATOR_PATCH = GNOME_DIR / "patches" / "clipboard-indicator.patch"
+LIVE_CLIPBOARD_INDICATOR_DIR = (
+    Path.home()
+    / ".local"
+    / "share"
+    / "gnome-shell"
+    / "extensions"
+    / "clipboard-indicator@tudmotu.com"
+)
 
 FORBIDDEN_DCONF_SECTIONS = (
     "org/gnome/nm-applet",
@@ -125,3 +134,81 @@ class GnomeConfigTests(unittest.TestCase):
         self.assertIn("+        if (this.data.isEnabled && !this.data.isShuttingDown) {", patch_text)
         self.assertIn("+                'SessionOver',", patch_text)
         self.assertIn("+            else if (obj.get_if_signaled() && reloadTime < 500)", patch_text)
+
+    def test_clipboard_indicator_patch_is_well_formed(self) -> None:
+        patch_text = CLIPBOARD_INDICATOR_PATCH.read_text(encoding="utf-8")
+        self.assertIn("--- a/extension.js", patch_text)
+        self.assertIn("+++ b/extension.js", patch_text)
+        self.assertIn("--- a/registry.js", patch_text)
+        self.assertIn("+++ b/registry.js", patch_text)
+        self.assertIn("this.favoritesSection?.destroy();", patch_text)
+        self.assertIn("this.historySection?.destroy();", patch_text)
+        self.assertIn("this._removeEntry(item, 'move', true);", patch_text)
+        self.assertIn("ClipboardEntry.fromJSON(jsonEntry, { lazyImage: true })", patch_text)
+        self.assertIn("releaseToDisk (diskPath)", patch_text)
+
+    @unittest.skipUnless(
+        shutil.which("gjs")
+        and Path("/usr/lib/gnome-shell/St-18.typelib").exists()
+        and (LIVE_CLIPBOARD_INDICATOR_DIR / "registry.js").exists(),
+        "gjs, St-18.typelib, and live clipboard-indicator are required for lazy-image test",
+    )
+    def test_live_clipboard_indicator_registry_lazy_loads_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = Path(tmp) / "verify_registry.js"
+            cache_dir = Path(tmp) / "cache"
+            cache_dir.mkdir(mode=0o700)
+            driver.write_text(
+                f"""import GLib from 'gi://GLib';
+import System from 'system';
+
+const settings = {{
+    get_int(k) {{
+        if (k === 'cache-size') return 100;
+        if (k === 'history-size') return 50;
+        return 10;
+    }},
+}};
+
+const loop = new GLib.MainLoop(null, false);
+GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {{
+    (async () => {{
+        const {{ Registry, ClipboardEntry }} = await import({json.dumps((LIVE_CLIPBOARD_INDICATOR_DIR / "registry.js").as_uri())});
+        const reg = new Registry({{ settings, uuid: 'ci-unit-test' }});
+        GLib.mkdir_with_parents(`${{GLib.get_user_cache_dir()}}/ci-unit-test`, 0o700);
+        const raw = new Uint8Array(65536);
+        raw.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x42]);
+        const img = new ClipboardEntry('image/png', raw, true);
+        img.setTag('shot');
+        const h = img.hash();
+        await reg.writeEntryFile(img);
+        if (img.hasInMemoryBytes()) throw new Error('writeEntryFile did not release #bytes');
+        reg.write([img]);
+        await new Promise(r => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {{ r(); return GLib.SOURCE_REMOVE; }}));
+
+        const loaded = await reg.read();
+        if (loaded.length !== 1) throw new Error(`unexpected count ${{loaded.length}}`);
+        const item = loaded[0];
+        if (item.hasInMemoryBytes()) throw new Error('Registry.read eagerly loaded image bytes');
+        if (item.hash() !== h) throw new Error('hash mismatch');
+        if (!item.isFavorite() || item.getTag() !== 'shot') throw new Error('metadata mismatch');
+        const bytes = item.asBytes();
+        if (bytes.get_size() !== 65536) throw new Error(`unexpected size ${{bytes.get_size()}}`);
+        if (item.hasInMemoryBytes()) throw new Error('asBytes permanently pinned #bytes');
+        item.dispose();
+        loop.quit();
+    }})().catch(e => {{
+        console.error(e);
+        System.exit(1);
+    }});
+    return GLib.SOURCE_REMOVE;
+}});
+loop.run();
+""",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CACHE_HOME"] = str(cache_dir)
+            env["GI_TYPELIB_PATH"] = "/usr/lib/gnome-shell:/usr/lib/x86_64-linux-gnu/mutter-18"
+            env["LD_LIBRARY_PATH"] = "/usr/lib/gnome-shell:/usr/lib/x86_64-linux-gnu/mutter-18"
+            subprocess.run(["gjs", "-m", str(driver)], env=env, check=True, timeout=10)

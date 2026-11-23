@@ -1,0 +1,414 @@
+--- a/extension.js
++++ b/extension.js
+@@ -99,13 +99,66 @@
+         this._disconnectSelectionListener();
+         this._clearDelayedSelectionTimeout();
+         this.#clearTimeouts();
++        if (this.#moveFirstClosedId && this.menu) {
++            this.menu.disconnect(this.#moveFirstClosedId);
++            this.#moveFirstClosedId = 0;
++        }
++        this.#moveFirstOnClose = [];
+         this.#closeImagePreview();
+         this._removeHistoryLabel();
+         this._destroyNotifSource();
+-        this.dialogManager.destroy();
+-        this.keyboard.destroy();
+-        this._cursorActor.destroy();
+-        this._cursorActor = null;
++        this.dialogManager?.destroy();
++        this.dialogManager = null;
++        this.keyboard?.destroy();
++        this.keyboard = null;
++        if (this._cursorActor) {
++            this._cursorActor.destroy();
++            this._cursorActor = null;
++        }
++
++        for (const item of this.clipItemsRadioGroup) {
++            item.entry?.dispose?.();
++            item.entry = null;
++            item.radioGroup = null;
++            item.menu = null;
++            item.previewImage = null;
++            item.destroy();
++        }
++        this.clipItemsRadioGroup = [];
++
++        // PopupMenuSection subscribes to Main.sessionMode in PopupMenuBase's
++        // constructor; because its .actor is wrapped in St.ScrollView rather
++        // than registered directly as a PopupMenu item, this.menu.destroy()
++        // never disconnects it from Main.sessionMode unless destroyed explicitly.
++        this.favoritesSection?.destroy();
++        this.favoritesSection = null;
++        this.historySection?.destroy();
++        this.historySection = null;
++
++        for (const prop of [
++            '_entryItem',
++            'favoritesSeparator',
++            'historySeparator',
++            'clearMenuItem',
++            'settingsMenuItem',
++            'emptyStateSection',
++        ]) {
++            if (this[prop]) {
++                this[prop].destroy();
++                this[prop] = null;
++            }
++        }
++        this.searchEntry = null;
++        this.timerLabel = null;
++        this.resetTimerButton = null;
++        this.privateModeMenuItem = null;
++        this.favoritesScrollView = null;
++        this.historyScrollView = null;
++        this.scrollViewFavoritesMenuSection = null;
++        this.scrollViewMenuSection = null;
++        this._focusItemOnOpen = null;
++        this.registry = null;
++        this.extension = null;
+ 
+         super.destroy();
+     }
+@@ -197,11 +250,24 @@
+                 this._buttonText.set_text('');
+                 this._buttonImgPreview.destroy_all_children();
+                 this.registry.getEntryAsImage(entry).then(img => {
++                    if (this._destroyed || !img) {
++                        img?.destroy?.();
++                        return;
++                    }
+                     img.add_style_class_name('clipboard-indicator-img-preview');
+                     img.y_align = Clutter.ActorAlign.CENTER;
+ 
+                     // icon only renders properly in setTimeout for some arcane reason
++                    if (this._imagePreviewTimeout) {
++                        clearTimeout(this._imagePreviewTimeout);
++                    }
+                     this._imagePreviewTimeout = setTimeout(() => {
++                        this._imagePreviewTimeout = null;
++                        if (this._destroyed || !this._buttonImgPreview) {
++                            img.destroy();
++                            return;
++                        }
++                        this._buttonImgPreview.destroy_all_children();
+                         this._buttonImgPreview.set_child(img);
+                     }, 0);
+                 });
+@@ -229,6 +295,7 @@
+     async _buildMenu () {
+         const clipHistory = await this._getCache();
+         if (this._destroyed) {
++            clipHistory.forEach(entry => entry?.dispose?.());
+             return;
+         }
+         let lastIdx = clipHistory.length - 1;
+@@ -411,7 +478,7 @@
+         clipHistory.forEach(entry => this._addEntry(entry));
+ 
+         if (lastIdx >= 0) {
+-            this._selectMenuItem(clipItemsArr[lastIdx]);
++            this._selectMenuItem(clipItemsArr[lastIdx], false);
+         }
+ 
+         this.#showElements();
+@@ -568,9 +635,14 @@
+         }
+         else if (entry.isImage()) {
+             this.registry.getEntryAsImage(entry).then(img => {
++                if (this._destroyed || !img || !menuItem.entry) {
++                    img?.destroy?.();
++                    return;
++                }
+                 img.add_style_class_name('clipboard-menu-img-preview');
+                 if (menuItem.previewImage) {
+                     menuItem.remove_child(menuItem.previewImage);
++                    menuItem.previewImage.destroy();
+                 }
+                 menuItem.previewImage = img;
+                 menuItem.insert_child_below(img, menuItem.label);
+@@ -907,11 +979,21 @@
+             this.#clearClipboard();
+         }
+ 
++        const entry = menuItem.entry;
++        menuItem.entry = null;
++        menuItem.radioGroup = null;
++        menuItem.menu = null;
++        menuItem.previewImage = null;
+         menuItem.destroy();
+-        this.clipItemsRadioGroup.splice(itemIdx,1);
++        if (itemIdx >= 0) {
++            this.clipItemsRadioGroup.splice(itemIdx, 1);
++        }
+ 
+-        if (menuItem.entry.isImage()) {
+-            this.registry.deleteEntryFile(menuItem.entry);
++        if (event !== 'move') {
++            if (entry?.isImage()) {
++                this.registry.deleteEntryFile(entry);
++            }
++            entry?.dispose?.();
+         }
+ 
+         // The caller updates the cache and the menu once when removing many
+@@ -1099,8 +1181,9 @@
+     }
+ 
+     _moveItemFirst (item) {
+-        this._removeEntry(item);
+-        this._addEntry(item.entry, item.currentlySelected, false);
++        const { entry, currentlySelected } = item;
++        this._removeEntry(item, 'move', true);
++        this._addEntry(entry, currentlySelected, false);
+         this._updateCache();
+     }
+ 
+@@ -1621,11 +1704,14 @@
+             return;
+ 
+         this.selection.disconnect(this._selectionOwnerChangedId);
++        this._selectionOwnerChangedId = null;
++        this.selection = null;
+     }
+ 
+     _clearDelayedSelectionTimeout () {
+         if (this._delayedSelectionTimeoutId) {
+-            clearInterval(this._delayedSelectionTimeoutId);
++            clearTimeout(this._delayedSelectionTimeoutId);
++            this._delayedSelectionTimeoutId = null;
+         }
+     }
+ 
+--- a/registry.js
++++ b/registry.js
+@@ -10,6 +10,7 @@
+ export class Registry {
+     #writing = false;
+     #pendingWrite = null;
++    #inflightWrites = new Map();
+ 
+     constructor ({ settings, uuid }) {
+         this.uuid = uuid;
+@@ -132,7 +133,7 @@
+                             }
+                             const entriesPromises = registry.map(
+                                 jsonEntry => {
+-                                    return ClipboardEntry.fromJSON(jsonEntry)
++                                    return ClipboardEntry.fromJSON(jsonEntry, { lazyImage: true })
+                                 }
+                             );
+ 
+@@ -250,25 +251,48 @@
+     }
+ 
+     async writeEntryFile (entry) {
+-        if (this.#entryFileExists(entry)) return;
++        const filename = this.getEntryFilename(entry);
++        if (this.#entryFileExists(entry)) {
++            if (entry.isImage()) entry.releaseToDisk(filename);
++            return;
++        }
+ 
+-        let file = Gio.file_new_for_path(this.getEntryFilename(entry));
++        if (this.#inflightWrites.has(filename)) {
++            return this.#inflightWrites.get(filename);
++        }
+ 
+-        return new Promise(resolve => {
+-            file.replace_async(null, false, Gio.FileCreateFlags.NONE,
+-                               GLib.PRIORITY_DEFAULT, null, (obj, res) => {
++        const bytes = entry.asBytes();
++        if (bytes.get_size() === 0) return;
+ 
+-                let stream = obj.replace_finish(res);
++        let file = Gio.file_new_for_path(filename);
+ 
+-                stream.write_bytes_async(entry.asBytes(), GLib.PRIORITY_DEFAULT,
+-                                         null, (w_obj, w_res) => {
++        const writePromise = new Promise((resolve, reject) => {
++            file.replace_async(null, false, Gio.FileCreateFlags.NONE,
++                               GLib.PRIORITY_DEFAULT, null, (obj, res) => {
++                try {
++                    let stream = obj.replace_finish(res);
+ 
+-                    w_obj.write_bytes_finish(w_res);
+-                    stream.close(null);
+-                    resolve();
+-                });
++                    stream.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT,
++                                             null, (w_obj, w_res) => {
++                        try {
++                            w_obj.write_bytes_finish(w_res);
++                            stream.close(null);
++                            if (entry.isImage()) entry.releaseToDisk(filename);
++                            resolve();
++                        } catch (e) {
++                            reject(e);
++                        }
++                    });
++                } catch (e) {
++                    reject(e);
++                }
+             });
++        }).finally(() => {
++            this.#inflightWrites.delete(filename);
+         });
++
++        this.#inflightWrites.set(filename, writePromise);
++        return writePromise;
+     }
+ 
+     async deleteEntryFile (entry) {
+@@ -305,6 +329,7 @@
+     #mimetype;
+     #bytes;
+     #favorite;
++    #diskPath = null;
+     #cachedHash = null;
+     #cachedString = null;
+ 
+@@ -318,7 +343,7 @@
+             mimetype === 'UTF8_STRING';
+     }
+ 
+-    static async fromJSON (jsonEntry) {
++    static async fromJSON (jsonEntry, { lazyImage = false } = {}) {
+         const mimetype = jsonEntry.mimetype || 'text/plain;charset=utf-8';
+         const favorite = jsonEntry.favorite;
+         let bytes;
+@@ -328,22 +353,55 @@
+         }
+         else {
+             const filename = jsonEntry.contents;
+-            if (!GLib.file_test(filename, FileTest.EXISTS)) return null;
++            if (typeof filename !== 'string' || !GLib.file_test(filename, FileTest.EXISTS)) return null;
+ 
+             let file = Gio.file_new_for_path(filename);
+ 
+-            const contentType = await file.query_info_async('*', FileQueryInfoFlags.NONE, GLib.PRIORITY_DEFAULT, null, (obj, res) => {
+-                try {
+-                    const fileInfo = obj.query_info_finish(res);
+-                    return fileInfo.get_content_type();
+-                } catch (e) {
+-                    console.error(e);
+-                }
++            const fileInfo = await new Promise(resolve => {
++                file.query_info_async(
++                    'standard::content-type,standard::size',
++                    FileQueryInfoFlags.NONE,
++                    GLib.PRIORITY_DEFAULT,
++                    null,
++                    (obj, res) => {
++                        try {
++                            resolve(obj.query_info_finish(res));
++                        } catch (e) {
++                            console.error(e);
++                            resolve(null);
++                        }
++                    }
++                );
+             });
++            const contentType = fileInfo?.get_content_type?.();
+ 
+             if (contentType && !contentType.startsWith('image/') && !contentType.startsWith('text/')) {
+                 bytes = new TextEncoder().encode(jsonEntry.contents);
+             }
++            else if (lazyImage && mimetype.startsWith('image/')) {
++                if (fileInfo && fileInfo.get_size() === 0) return null;
++                const basename = GLib.path_get_basename(filename);
++                if (/^\d+$/.test(basename)) {
++                    const entry = new ClipboardEntry(
++                        mimetype,
++                        null,
++                        favorite,
++                        filename,
++                        Number.parseInt(basename, 10)
++                    );
++                    if (jsonEntry.tag) entry.setTag(jsonEntry.tag);
++                    return entry;
++                }
++                bytes = await new Promise((resolve, reject) => file.load_contents_async(null, (obj, res) => {
++                    let [success, contents] = obj.load_contents_finish(res);
++                    if (success) resolve(contents);
++                    else reject(new Error('Clipboard Indicator: could not read image file from cache'));
++                }));
++                const entry = new ClipboardEntry(mimetype, bytes, favorite);
++                entry.releaseToDisk(filename);
++                if (jsonEntry.tag) entry.setTag(jsonEntry.tag);
++                return entry;
++            }
+             else {
+                 bytes = await new Promise((resolve, reject) => file.load_contents_async(null, (obj, res) => {
+                     let [success, contents] = obj.load_contents_finish(res);
+@@ -365,10 +423,12 @@
+         return entry;
+     }
+ 
+-    constructor (mimetype, bytes, favorite) {
++    constructor (mimetype, bytes, favorite, diskPath = null, cachedHash = null) {
+         this.#mimetype = mimetype;
+         this.#bytes = bytes;
+         this.#favorite = favorite;
++        this.#diskPath = diskPath;
++        this.#cachedHash = cachedHash;
+     }
+ 
+     #encode () {
+@@ -376,7 +436,8 @@
+             return this.getStringValue();
+         }
+ 
+-        return [...this.#bytes]
++        const raw = this.#bytes ?? this.asBytes().get_data();
++        return [...raw]
+             .map(x => x.toString(16).padStart(2, '0'))
+             .join('');
+     }
+@@ -425,8 +486,36 @@
+         this.#tag = tag || null;
+     }
+ 
++    releaseToDisk (diskPath) {
++        if (!diskPath) return;
++        this.#cachedHash = this.hash();
++        this.#diskPath = diskPath;
++        this.#bytes = null;
++    }
++
++    dispose () {
++        this.#bytes = null;
++        this.#diskPath = null;
++        this.#cachedString = null;
++    }
++
++    hasInMemoryBytes () {
++        return this.#bytes !== null;
++    }
++
+     asBytes () {
+-        return GLib.Bytes.new(this.#bytes);
++        if (this.#bytes !== null) {
++            return GLib.Bytes.new(this.#bytes);
++        }
++        if (this.#diskPath !== null && GLib.file_test(this.#diskPath, FileTest.EXISTS)) {
++            try {
++                const [ok, contents] = GLib.file_get_contents(this.#diskPath);
++                if (ok) return GLib.Bytes.new(contents);
++            } catch (e) {
++                console.error(e);
++            }
++        }
++        return GLib.Bytes.new(new Uint8Array(0));
+     }
+ 
+     equals (otherEntry) {
+@@ -435,6 +524,6 @@
+     }
+ 
+     hash () {
+-        return (this.#cachedHash ??= GLib.Bytes.new(this.#bytes).hash());
++        return (this.#cachedHash ??= this.asBytes().hash());
+     }
+ }

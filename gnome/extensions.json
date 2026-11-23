@@ -23,11 +23,11 @@
       "scope": "user",
       "enabled": true,
       "session_mode": false,
-      "version": 72,
+      "version": 74,
       "shell_version": ["47", "48", "49", "50", "51"],
       "url": "https://github.com/Tudmotu/gnome-shell-extension-clipboard-indicator",
       "settings_schema": "org.gnome.shell.extensions.clipboard-indicator",
-      "notes": "Toggle menu bound to <Super>v."
+      "notes": "Toggle menu bound to <Super>v; carries local patch gnome/patches/clipboard-indicator.patch fixing PopupMenuSection Main.sessionMode retention on disable() and lazy-loading cached image bytes from disk."
     },
     {
       "uuid": "hibernate-power-menu@arnakazim",
